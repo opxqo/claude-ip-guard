@@ -1,0 +1,4 @@
+#!/bin/zsh
+# Gate for the Claude desktop app.
+# Delegate to the same native gate, including readiness and double confirmation.
+open -a "$HOME/Applications/Claude (IP Guard).app"

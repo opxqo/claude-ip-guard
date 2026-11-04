@@ -1,0 +1,17 @@
+#!/bin/zsh
+# Gate: runs BEFORE Claude Code starts, then hands off to the IP watcher.
+G=$'\e[32m'; R=$'\e[31m'; D=$'\e[2m'; X=$'\e[0m'
+print -n "${D}… CleanIP 检测出口 IP${X}"
+j=$(~/.claude/bin/claude-ip-check --json); ok=$?
+read -r ip score grade type <<< "$(print -r -- "$j" | /usr/bin/python3 -c 'import sys,json
+d=json.loads(sys.stdin.read() or "{}"); print(d.get("ip") or "-", d.get("score") or "-", d.get("grade") or "-", (d.get("type") or "-").replace(" ",""))' 2>/dev/null)"
+if (( ok != 0 )); then
+  why=$(print -r -- "$j" | /usr/bin/python3 -c 'import sys,json; print(json.loads(sys.stdin.read() or "{}").get("why") or "lookup failed")' 2>/dev/null)
+  print "\r${R}✗ 拒绝启动 · ${why} · ${ip}${X}          " >&2; exit 1
+fi
+if ! ~/.claude/bin/claude-ip-override --ensure "$ip" >/dev/null; then
+  print "监控未就绪，拒绝启动 Claude Code" >&2
+  exit 1
+fi
+print "\r${G}✓ CleanIP ${score} ${grade} · ${type} · ${ip} · 已启动 IP 监听${X}          "
+exec claude "$@"

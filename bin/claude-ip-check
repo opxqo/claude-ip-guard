@@ -1,0 +1,41 @@
+#!/bin/zsh
+# CleanIP gate. Exit 0 only if score > MIN and resolved type is residential. Fail-closed.
+#   claude-ip-check          -> "OK <ip> <score>" or a reason
+#   claude-ip-check --json   -> one JSON line: ok, why, ip, score, grade, type, native, network, location
+# Threshold lives in ~/.claude/ip-guard.conf (MIN_SCORE=<0-99>); anything invalid falls back to 95.
+MIN=$(sed -n 's/^MIN_SCORE=\([0-9][0-9]*\)[[:space:]]*$/\1/p' "$HOME/.claude/ip-guard.conf" 2>/dev/null | tail -1)
+[[ -n $MIN && $MIN -le 99 ]] || MIN=95
+r=$("$HOME/.claude/bin/claude-ip-override" --fetch-cleanip 2>&1)
+lookup_status=$?
+lookup_error=''
+if (( lookup_status != 0 )); then lookup_error=$r; r=''; fi
+printf '%s' "$r" | MIN=$MIN MODE="$1" LOOKUP_ERROR="$lookup_error" /usr/bin/python3 -c '
+import sys,re,os,json
+t=re.sub(r"\x1b\[[0-9;]*m","",sys.stdin.read())
+def f(*labels):
+    for label in labels:
+        m=re.search(r"^\s*"+label+r"\s+(.+?)\s*$",t,re.M)
+        if m: return re.sub(r"\s+"," ",m.group(1).replace("[","").replace("]","")).strip()
+    return None
+ip=re.search(r"^\s*IP\s+([0-9a-fA-F:.]+)(?:\s|$)",t,re.M)
+sc=re.search(r"CleanIP\s*评分.*?(\d+)\s*/\s*100(?:\s*\((\S+?)\))?",t)
+raw_type=f("IP 类型","IP类型","类型")
+network=f("网络类型","网络")
+ty=raw_type
+# Current CLI can report an unknown IP type alongside an explicit residential network.
+# Use that network only as a fallback; a known non-residential IP type still blocks.
+if raw_type in (None, "未知类型", "未知") and re.sub(r"\s+", "", network or "") == "住宅IP":
+    ty="住宅 IP"
+d={"min":int(os.environ["MIN"]),"ok":False,"why":None,"ip":ip.group(1) if ip else None,"score":int(sc.group(1)) if sc else None,
+   "grade":sc.group(2) if sc else None,"type":ty,"ip_type":raw_type,"native":f("原生 / 广播"),"network":network,"location":f("归属地")}
+MIN=int(os.environ["MIN"])
+if not (ip and sc and ty):
+    miss=[n for n,v in (("IP",ip),("评分",sc),("类型",ty)) if not v]
+    d["why"]=os.environ.get("LOOKUP_ERROR") or ("lookup failed or format changed (missing: %s)"%",".join(miss) if t.strip() else "lookup failed (empty response)")
+elif d["score"]<=MIN: d["why"]="score %d <= %d"%(d["score"],MIN)
+elif "住宅" not in ty: d["why"]="not residential: %s"%ty
+else: d["ok"]=True
+if os.environ.get("MODE")=="--json": print(json.dumps(d,ensure_ascii=False))
+elif d["ok"]: print("OK %s %d"%(d["ip"],d["score"]))
+else: print("%s (%s)"%(d["why"],d["ip"]) if d["ip"] else d["why"])
+sys.exit(0 if d["ok"] else 1)'

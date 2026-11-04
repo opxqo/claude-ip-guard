@@ -1,0 +1,118 @@
+#!/usr/bin/python3
+"""Process-scoped CleanIP override; the native launcher owns user confirmation."""
+import ipaddress
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+import claude_network as network
+
+ROOT = Path.home() / '.claude/run'
+WATCH = Path.home() / '.claude/bin/claude-ip-watch'
+
+
+def process(pid):
+    if pid <= 1:
+        return None
+    p = subprocess.run(['/bin/ps', '-p', str(pid), '-o', 'ppid=', '-o', 'lstart=', '-o', 'comm='],
+                       capture_output=True, text=True)
+    parts = p.stdout.strip().split(None, 6)
+    if p.returncode or len(parts) != 7:
+        return None
+    return {'parent': int(parts[0]), 'started': ' '.join(parts[1:6]), 'command': parts[6]}
+
+
+def is_claude(info):
+    cmd = info['command'] if info else ''
+    return (cmd == '/Applications/Claude.app/Contents/MacOS/Claude'
+            or '/claude.app/Contents/MacOS/claude' in cmd
+            or cmd.startswith(str(Path.home() / '.local/share/claude/versions/')))
+
+
+def ipv4(value):
+    return str(ipaddress.IPv4Address(value))
+
+
+def baseline():
+    return network.probe()[0]
+
+
+def watcher_ready(ip):
+    return network.health(ip) is not None
+
+
+def grant(pid, ip):
+    caller = process(os.getppid())
+    launcher = str(Path.home() / 'Applications/Claude (IP Guard).app/Contents/MacOS/ClaudeIPGuard')
+    if not caller or caller['command'] != launcher:
+        raise ValueError('请通过启动器的两次确认授权，不能直接调用授权命令')
+    ip = ipv4(ip)
+    info = process(pid)
+    if not is_claude(info):
+        raise ValueError('目标 Claude 进程不存在，授权未保存')
+    ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
+    network.ensure(ip)
+    # Recheck after the watcher starts to avoid granting a recycled/exited PID.
+    if process(pid) != info:
+        raise ValueError('Claude 进程已变化，请重新确认')
+    data = {'pid': pid, 'started': info['started'], 'command': info['command'], 'ip': ip}
+    path = ROOT / ('force-%s.json' % pid)
+    temp = ROOT / ('force-%s-%s.tmp' % (pid, os.getpid()))
+    fd = os.open(str(temp), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    with os.fdopen(fd, 'w') as f:
+        json.dump(data, f)
+    os.replace(temp, path)
+    return data
+
+
+def status(pid):
+    for _ in range(32):
+        info = process(pid)
+        if not info:
+            break
+        path = ROOT / ('force-%s.json' % pid)
+        try:
+            data = json.loads(path.read_text())
+            if (is_claude(info) and data['pid'] == pid and data['started'] == info['started']
+                    and data['command'] == info['command'] and watcher_ready(ipv4(data['ip']))):
+                return data
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        pid = info['parent']
+    return None
+
+
+def main():
+    try:
+        action = sys.argv[1]
+        if action == '--baseline':
+            print(baseline())
+        elif action == '--ensure':
+            network.ensure(sys.argv[2])
+            print('ready')
+        elif action == '--health':
+            data = network.health()
+            print(json.dumps(data))
+            return 0 if data else 1
+        elif action == '--verify':
+            print(json.dumps(network.verify()))
+        elif action == '--fetch-cleanip':
+            print(network.fetch('https://cleanip.io/cli', timeout=6))
+        elif action == '--grant':
+            print(json.dumps(grant(int(sys.argv[2]), sys.argv[3])))
+        elif action == '--status':
+            data = status(os.getppid())
+            print(json.dumps(data))
+            return 0 if data else 1
+        else:
+            raise ValueError('unknown action')
+        return 0
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())

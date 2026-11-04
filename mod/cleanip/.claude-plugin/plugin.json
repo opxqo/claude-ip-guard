@@ -1,0 +1,6 @@
+{
+  "name": "cleanip",
+  "version": "0.3.0",
+  "description": "Checks CleanIP and a fixed egress IPv4 at session start, monitors exit IP and heartbeat, and gates prompts and model requests. Includes a double-confirmed, process-scoped override.",
+  "types": "./types/index.d.ts"
+}

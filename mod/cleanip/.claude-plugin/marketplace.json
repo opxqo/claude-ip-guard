@@ -1,0 +1,5 @@
+{
+  "name": "local-mods",
+  "owner": { "name": "opxqo" },
+  "plugins": [{ "name": "cleanip", "source": "./" }]
+}
