@@ -1,4 +1,4 @@
-// Claude (IP Guard) launcher: a splash window that runs the CleanIP check,
+// Claude (IP Guard) launcher: a splash window that runs the CleanIP + ip.net.coffee check,
 // starts the egress-IP watcher, then opens Claude. Fails closed.
 //   ClaudeIPGuard                     normal launch
 //   ClaudeIPGuard --snapshot <dir>    render pass/fail states to PNG and exit
@@ -29,14 +29,14 @@ func helper(_ arguments: [String]) -> String? {
     let first = NSAlert()
     first.alertStyle = .warning
     first.messageText = "强制启动 · 第一次确认"
-    first.informativeText = "检测未通过：\(reason)\n\n继续将跳过本次 CleanIP 评分和住宅类型检查，无法据此确认出口安全。出口 IP 查询暂时失败时会暂停重试；持续失败约 30 秒或确认 IP 改变时仍会关闭 Claude。授权在当前 Claude 进程退出后失效。"
+    first.informativeText = "检测未通过：\(reason)\n\n继续将跳过本次 CleanIP 与 ip.net.coffee 的检测，无法据此确认出口安全。出口 IP 查询暂时失败时会暂停重试；持续失败约 30 秒或确认 IP 改变时仍会关闭 Claude。授权在当前 Claude 进程退出后失效。"
     first.addButton(withTitle: "取消")
     first.addButton(withTitle: "我已了解，继续确认")
     guard first.runModal() == .alertSecondButtonReturn else { return false }
     let second = NSAlert()
     second.alertStyle = .critical
     second.messageText = "强制启动 · 第二次确认"
-    second.informativeText = "再次确认：即使 CleanIP 检测未通过，仍要启动 Claude？\n\n仅对本次运行生效，出口 IP 变化监控继续保留。"
+    second.informativeText = "再次确认：即使 CleanIP / ip.net.coffee 检测未通过，仍要启动 Claude？\n\n仅对本次运行生效，出口 IP 变化监控继续保留。"
     second.addButton(withTitle: "取消")
     second.addButton(withTitle: "仅本次强制启动")
     return second.runModal() == .alertSecondButtonReturn
@@ -56,6 +56,7 @@ struct Report: Decodable {
     var native: String?
     var network: String?
     var location: String?
+    var trust: Double?
 }
 
 enum StepState { case waiting, running, done, failed }
@@ -69,9 +70,17 @@ final class Model: ObservableObject {
         }
         return 95
     }
+    // MIN_TRUST for the ip.net.coffee second opinion, same rule as claude-ip-check.
+    static var minTrust: Int {
+        let text = (try? String(contentsOfFile: "\(home)/.claude/ip-guard.conf", encoding: .utf8)) ?? ""
+        for line in text.split(separator: "\n").reversed() where line.hasPrefix("MIN_TRUST=") {
+            if let n = Int(line.dropFirst(10).trimmingCharacters(in: .whitespaces)), (0...100).contains(n) { return n }
+        }
+        return 80
+    }
     @Published var min = Model.minScore
-    var titles: [String] { ["查询出口 IP(CleanIP)", "评分高于 \(min) 且为住宅 IP", "启动 IP 监听", "打开 Claude"] }
-    @Published var steps: [StepState] = Array(repeating: .waiting, count: 4)
+    var titles: [String] { ["查询出口 IP(CleanIP)", "评分高于 \(min) 且为住宅 IP", "核验 IP 风险(ip.net.coffee)", "启动 IP 监听", "打开 Claude"] }
+    @Published var steps: [StepState] = Array(repeating: .waiting, count: 5)
     @Published var report: Report?
     @Published var failure: String?
     @Published var forcing = false
@@ -117,7 +126,7 @@ final class Model: ObservableObject {
     var isFailed: Bool { failure != nil }
 
     func run() {
-        steps = Array(repeating: .waiting, count: 4)
+        steps = Array(repeating: .waiting, count: 5)
         report = nil
         failure = nil
         min = Model.minScore
@@ -138,18 +147,25 @@ final class Model: ObservableObject {
         steps[0] = .done
         steps[1] = .running
         after(0.35) {
-            guard r.ok, let ip = r.ip else { return self.fail(1, self.reason(r)) }
+            // CleanIP's own verdict first; the ip.net.coffee verdict is what is left when it still fails overall.
+            let cleanipPass = (r.score ?? 0) > (r.min ?? self.min) && (r.type?.contains("住宅") ?? false)
+            guard r.ip != nil, cleanipPass else { return self.fail(1, self.reason(r)) }
             self.steps[1] = .done
             self.steps[2] = .running
-            after(0.3) {
-                guard Self.startWatcher(ip) else { return self.fail(2, "IP 监听启动失败") }
+            after(0.35) {
+                guard r.ok, let ip = r.ip else { return self.fail(2, self.reason(r)) }
                 self.steps[2] = .done
                 self.steps[3] = .running
-                NSWorkspace.shared.openApplication(at: claudeApp, configuration: .init()) { _, err in
-                    DispatchQueue.main.async {
-                        if let err { return self.fail(3, "无法打开 Claude:\(err.localizedDescription)") }
-                        self.steps[3] = .done
-                        after(1.0) { NSApp.terminate(nil) }
+                after(0.3) {
+                    guard Self.startWatcher(ip) else { return self.fail(3, "IP 监听启动失败") }
+                    self.steps[3] = .done
+                    self.steps[4] = .running
+                    NSWorkspace.shared.openApplication(at: claudeApp, configuration: .init()) { _, err in
+                        DispatchQueue.main.async {
+                            if let err { return self.fail(4, "无法打开 Claude:\(err.localizedDescription)") }
+                            self.steps[4] = .done
+                            after(1.0) { NSApp.terminate(nil) }
+                        }
                     }
                 }
             }
@@ -249,7 +265,7 @@ struct Splash: View {
                     Text("Claude · 安全启动").font(.system(size: 16, weight: .semibold))
                     HStack(spacing: 5) {
                         Ring(color: green, size: 10)
-                        Text("出口 IP 检测由 cleanip.io 提供").font(.system(size: 11)).foregroundStyle(.secondary)
+                        Text("出口 IP 检测由 cleanip.io 与 ip.net.coffee 提供").font(.system(size: 11)).foregroundStyle(.secondary)
                     }
                 }
                 Spacer()
@@ -293,6 +309,7 @@ struct Splash: View {
                         if let n = r.native { Tag(text: n, color: green) }
                         if let t = r.type { Tag(text: t, color: t.contains("住宅") ? green : red) }
                         if let w = r.network { Tag(text: w, color: .blue) }
+                        if let t = r.trust { Tag(text: "可信度 \(Int(t))", color: Int(t) >= Model.minTrust ? green : red) }
                     }
                     if let l = r.location { Text(l).font(.system(size: 11)).foregroundStyle(.secondary) }
                 }
@@ -332,15 +349,20 @@ func appIcon() -> NSImage? {
 }
 
 @MainActor func snapshot(to dir: String) {
-    let ok = Report(ok: true, ip: "203.0.113.10", score: 97, grade: "A+", type: "住宅 IP", native: "原生 IP", network: "ISP", location: "美国 · 示例州 · 示例市")
+    let ok = Report(ok: true, ip: "203.0.113.10", score: 97, grade: "A+", type: "住宅 IP", native: "原生 IP", network: "ISP", location: "美国 · 示例州 · 示例市", trust: 100)
     var bad = ok
     bad.ok = false
     bad.score = 88
     bad.grade = "A"
+    var coffee = ok
+    coffee.ok = false
+    coffee.trust = 55
+    coffee.why = "net.coffee: trust 55 < 80"
     let cases: [(String, Report, [StepState], String?)] = [
-        ("splash-pass", ok, [.done, .done, .done, .done], nil),
-        ("splash-fail", bad, [.done, .failed, .waiting, .waiting], Model().reason(bad)),
-        ("splash-running", ok, [.done, .done, .running, .waiting], nil),
+        ("splash-pass", ok, [.done, .done, .done, .done, .done], nil),
+        ("splash-fail", bad, [.done, .failed, .waiting, .waiting, .waiting], Model().reason(bad)),
+        ("splash-running", ok, [.done, .done, .done, .running, .waiting], nil),
+        ("splash-coffee-fail", coffee, [.done, .done, .failed, .waiting, .waiting], coffee.why),
     ]
     for scheme in [ColorScheme.light, .dark] {
         for (name, r, steps, why) in cases {
@@ -401,7 +423,7 @@ let args = CommandLine.arguments
 if let i = args.firstIndex(of: "--confirm-session"), i + 1 < args.count, let pid = Int32(args[i + 1]), pid > 1 {
     _ = NSApplication.shared
     NSApp.setActivationPolicy(.accessory)
-    let approved = MainActor.assumeIsolated { confirmForce("Claude Code 会话的 CleanIP 检测失败或未通过") }
+    let approved = MainActor.assumeIsolated { confirmForce("Claude Code 会话的 CleanIP / ip.net.coffee 检测失败或未通过") }
     guard approved, let ip = helper(["--baseline"]), helper(["--grant", String(pid), ip]) != nil else { exit(1) }
     exit(0)
 }
