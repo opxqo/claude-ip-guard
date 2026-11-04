@@ -68,7 +68,7 @@ export const register: Register = on => {
     const started = await next(e)
     let r: Report
     try {
-      const checked = await $.process.run([CHECK, '--json'], { timeoutMs: 20000 })
+      const checked = await $.process.run([CHECK, '--json'], { timeoutMs: 70000 })  // the checker retries a failed lookup up to 3 times
       const parsed = JSON.parse(checked.stdout)
       if (typeof parsed.ok !== 'boolean' || (parsed.ok && typeof parsed.ip !== 'string')) throw Error('invalid report')
       r = parsed

@@ -102,6 +102,33 @@ class NetworkTests(unittest.TestCase):
         with patch.object(net, 'health', side_effect=[{'ip': '8.8.8.8'}, None]), patch.object(net, 'probe'):
             with self.assertRaises(ValueError): net.verify()
 
+    def test_verify_reuses_a_fresh_heartbeat_but_probes_a_stale_one(self):
+        with patch.object(net, 'health', return_value={'ip': '8.8.8.8', 'heartbeat': net.time.time()}), patch.object(net, 'probe') as probe:
+            self.assertEqual(net.verify()['ip'], '8.8.8.8')
+            probe.assert_not_called()
+        stale = {'ip': '8.8.8.8', 'heartbeat': net.time.time() - net.FRESH_HEARTBEAT - 1}
+        with patch.object(net, 'health', side_effect=[stale, stale]), patch.object(net, 'probe') as probe:
+            net.verify()
+            probe.assert_called_once_with('8.8.8.8')
+
+    def test_three_probe_endpoints_tolerate_one_failure_but_not_a_conflict(self):
+        self.assertEqual(len(net.URLS), 3)
+        self.assertEqual(net.classify(['', '8.8.8.8\n', 'timeout'], '8.8.8.8'), '8.8.8.8')
+        with self.assertRaises(net.ExitChanged): net.classify(['8.8.8.8', '8.8.8.8', '1.1.1.1'])
+
+    def test_checker_retries_only_failed_lookups(self):
+        script = (BIN / 'claude-ip-check').read_text()
+        self.assertIn('for attempt in 1 2 3', script)
+        self.assertIn('(( lookup_status == 0 )) && break', script)
+
+    def test_stale_force_grants_are_pruned_and_live_ones_kept(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(override, 'ROOT', Path(tmp)):
+            for pid in (101, 102): (Path(tmp) / f'force-{pid}.json').write_text(json.dumps({'pid': pid}))
+            (Path(tmp) / 'force-103.json').write_text('not json')
+            with patch.object(override, 'process', side_effect=lambda pid: {'parent': 1} if pid == 101 else None):
+                override.prune()
+            self.assertEqual([p.name for p in Path(tmp).glob('force-*.json')], ['force-101.json'])
+
     def test_target_selection_excludes_codex_and_monitor_descendants(self):
         rows = ('10 1 /Applications/Claude.app/Contents/MacOS/Claude\n'
                 '11 10 /Applications/Claude.app/Contents/Frameworks/Claude Helper\n'

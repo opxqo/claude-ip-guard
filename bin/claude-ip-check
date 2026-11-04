@@ -5,8 +5,13 @@
 # Threshold lives in ~/.claude/ip-guard.conf (MIN_SCORE=<0-99>); anything invalid falls back to 95.
 MIN=$(sed -n 's/^MIN_SCORE=\([0-9][0-9]*\)[[:space:]]*$/\1/p' "$HOME/.claude/ip-guard.conf" 2>/dev/null | tail -1)
 [[ -n $MIN && $MIN -le 99 ]] || MIN=95
-r=$("$HOME/.claude/bin/claude-ip-override" --fetch-cleanip 2>&1)
-lookup_status=$?
+# A failed lookup (network error, timeout) is retried; a clear verdict from CleanIP is never retried.
+for attempt in 1 2 3; do
+  r=$("$HOME/.claude/bin/claude-ip-override" --fetch-cleanip 2>&1)
+  lookup_status=$?
+  (( lookup_status == 0 )) && break
+  (( attempt < 3 )) && sleep 2
+done
 lookup_error=''
 if (( lookup_status != 0 )); then lookup_error=$r; r=''; fi
 printf '%s' "$r" | MIN=$MIN MODE="$1" LOOKUP_ERROR="$lookup_error" /usr/bin/python3 -c '

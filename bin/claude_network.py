@@ -10,7 +10,9 @@ import time
 
 ROOT = Path.home() / '.claude/run'
 WATCH = Path.home() / '.claude/bin/claude-ip-watch'
-URLS = ('https://api.ipify.org', 'https://ipv4.icanhazip.com')
+URLS = ('https://api.ipify.org', 'https://ipv4.icanhazip.com', 'https://checkip.amazonaws.com')
+# A heartbeat this young was published after a passing probe, so a prompt check can reuse it.
+FRESH_HEARTBEAT = 5
 HEALTH = ROOT / 'ip-watch-health.json'
 
 
@@ -46,12 +48,12 @@ def transport():
     return args, fingerprint
 
 
-def _curl_fetch(url, timeout=4, context=None, resolve=None):
+def _curl_fetch(url, timeout=5, context=None, resolve=None):
     args, _ = context or transport()
     if resolve:
         args = [*args, '--resolve', 'cleanip.io:443:' + str(ipaddress.IPv4Address(resolve))]
     p = subprocess.run(['/usr/bin/curl', '-4', '-f', '-sS', '-L', '--proto', '=https',
-                        '--proto-redir', '=https', '--connect-timeout', '3',
+                        '--proto-redir', '=https', '--connect-timeout', '4',
                         '--max-time', str(timeout), *args, url], capture_output=True, text=True,
                        timeout=timeout + 2)
     if p.returncode:
@@ -62,7 +64,7 @@ def _curl_fetch(url, timeout=4, context=None, resolve=None):
     return p.stdout
 
 
-def fetch(url, timeout=4, context=None):
+def fetch(url, timeout=5, context=None):
     ctx = context or transport()
     try:
         return _curl_fetch(url, timeout, ctx)
@@ -96,7 +98,7 @@ def classify(values, expected=None):
         except (ValueError, AttributeError):
             pass
     if not ips:
-        raise ProbeUnavailable('两个出口查询服务均未返回有效公网 IPv4')
+        raise ProbeUnavailable('所有出口查询服务均未返回有效公网 IPv4')
     if len(set(ips)) != 1:
         raise ExitChanged('出口查询结果不一致，可能存在分流或出口轮换')
     if expected and ips[0] != expected:
@@ -110,7 +112,7 @@ def probe(expected=None):
         try: return fetch(url, context=ctx), ''
         except (ValueError, subprocess.TimeoutExpired) as exc:
             return '', str(exc)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(URLS)) as pool:
         results = list(pool.map(read, URLS))
     if transport()[1] != ctx[1]:
         raise ProbeUnavailable('检测期间代理配置发生变化，请重试')
@@ -146,6 +148,8 @@ def verify():
     d = health()
     if not d:
         raise ValueError('IP 监控未就绪、心跳失效或代理配置已变化')
+    if time.time() - d.get('heartbeat', 0) <= FRESH_HEARTBEAT:
+        return d
     probe(d['ip'])
     if not health(d['ip']):
         raise ValueError('出口检测期间监控状态发生变化')
