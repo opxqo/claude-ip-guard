@@ -25,6 +25,10 @@ Checks repeat after a 3-second wait; DNS, proxy reads and HTTPS timeouts contrib
 
 `claude-ip-check` retries a failed CleanIP lookup (network error, timeout) up to 3 times, 2 seconds apart. A lookup that returns a clear verdict (score at or below the threshold, non-residential) is never retried. Stale `force-*.json` grants whose Claude process is gone are removed whenever a new grant is written.
 
+## Second provider
+
+After CleanIP passes, `claude-ip-check` also asks `https://ip.net.coffee/api/iprisk/<ip>` (through the same transport, `claude-ip-override --fetch-iprisk`). Both must pass: no datacenter/VPN/proxy/Tor/abuser flag, residential, `trust_score >= MIN_TRUST`, and the answer's `cidr` must contain the IP CleanIP reported. A failed lookup is retried 3 times and then fails closed. This is an undocumented page API and may change.
+
 ## Force mode
 
 Two separate native confirmation dialogs are required. The override skips only the CleanIP score/residential policy for the current Claude process. It still requires a successful exit-IP probe and healthy monitoring. Authorization is bound to the process ID and birth time, and is invalid without a live matching monitor. It cannot silently change the active baseline. No text entry is required.

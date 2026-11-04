@@ -1,10 +1,13 @@
 #!/bin/zsh
-# CleanIP gate. Exit 0 only if score > MIN and resolved type is residential. Fail-closed.
+# CleanIP + ip.net.coffee gate. Exit 0 only if CleanIP score > MIN and residential AND ip.net.coffee agrees. Fail-closed.
 #   claude-ip-check          -> "OK <ip> <score>" or a reason
 #   claude-ip-check --json   -> one JSON line: ok, why, ip, score, grade, type, native, network, location
-# Threshold lives in ~/.claude/ip-guard.conf (MIN_SCORE=<0-99>); anything invalid falls back to 95.
+# Thresholds live in ~/.claude/ip-guard.conf (MIN_SCORE=<0-99>, MIN_TRUST=<0-100>); invalid values fall back to 95 / 80.
 MIN=$(sed -n 's/^MIN_SCORE=\([0-9][0-9]*\)[[:space:]]*$/\1/p' "$HOME/.claude/ip-guard.conf" 2>/dev/null | tail -1)
 [[ -n $MIN && $MIN -le 99 ]] || MIN=95
+# Second opinion from ip.net.coffee: its trust_score must be >= MIN_TRUST (default 80, range 0-100).
+MINT=$(sed -n 's/^MIN_TRUST=\([0-9][0-9]*\)[[:space:]]*$/\1/p' "$HOME/.claude/ip-guard.conf" 2>/dev/null | tail -1)
+[[ -n $MINT && $MINT -le 100 ]] || MINT=80
 # A failed lookup (network error, timeout) is retried; a clear verdict from CleanIP is never retried.
 for attempt in 1 2 3; do
   r=$("$HOME/.claude/bin/claude-ip-override" --fetch-cleanip 2>&1)
@@ -14,8 +17,18 @@ for attempt in 1 2 3; do
 done
 lookup_error=''
 if (( lookup_status != 0 )); then lookup_error=$r; r=''; fi
-printf '%s' "$r" | MIN=$MIN MODE="$1" LOOKUP_ERROR="$lookup_error" /usr/bin/python3 -c '
-import sys,re,os,json
+# Both providers must agree. Look up the IP CleanIP reported; a failed lookup is retried, then fails closed.
+risk=''; risk_error=''
+cip=$(printf '%s' "$r" | sed $'s/\e\\[[0-9;]*m//g' | sed -n 's/^[[:space:]]*IP[[:space:]][[:space:]]*\([0-9][0-9.]*\)\([[:space:]].*\)\{0,1\}$/\1/p' | head -1)
+if [[ -n $cip ]]; then
+  for attempt in 1 2 3; do
+    risk=$("$HOME/.claude/bin/claude-ip-override" --fetch-iprisk "$cip" 2>&1) && { risk_error=''; break; }
+    risk_error=$risk; risk=''
+    (( attempt < 3 )) && sleep 2
+  done
+fi
+printf '%s' "$r" | MIN=$MIN MINT=$MINT COFFEE=1 RISK="$risk" RISK_ERROR="$risk_error" MODE="$1" LOOKUP_ERROR="$lookup_error" /usr/bin/python3 -c '
+import sys,re,os,json,ipaddress
 t=re.sub(r"\x1b\[[0-9;]*m","",sys.stdin.read())
 def f(*labels):
     for label in labels:
@@ -40,6 +53,23 @@ if not (ip and sc and ty):
 elif d["score"]<=MIN: d["why"]="score %d <= %d"%(d["score"],MIN)
 elif "住宅" not in ty: d["why"]="not residential: %s"%ty
 else: d["ok"]=True
+# Second provider (ip.net.coffee). Skipped only when the caller does not set COFFEE (unit tests).
+if d["ok"] and os.environ.get("COFFEE"):
+    try: rk=json.loads(os.environ.get("RISK") or "")
+    except ValueError: rk=None
+    if not isinstance(rk,dict):
+        d["ok"]=False; d["why"]="net.coffee: "+(os.environ.get("RISK_ERROR") or "lookup failed")
+    else:
+        tr=rk.get("trust_score"); d["trust"]=tr
+        bad=[k for k in ("is_datacenter","is_vpn","is_proxy","is_tor","is_abuser") if rk.get(k)]
+        # The service caches per /24 and may echo another address of the same block, so match on its cidr.
+        try: same=ipaddress.ip_address(d["ip"]) in ipaddress.ip_network(rk.get("cidr") or (rk.get("ip") or "")+"/32",strict=False)
+        except ValueError: same=False
+        if not same: d["why"]="net.coffee: answered for a different IP"
+        elif bad: d["why"]="net.coffee: flagged "+",".join(bad)
+        elif not (rk.get("isResidential") is True or rk.get("asn_kind")=="residential"): d["why"]="net.coffee: not residential"
+        elif not isinstance(tr,(int,float)) or isinstance(tr,bool) or tr<int(os.environ["MINT"]): d["why"]="net.coffee: trust %s < %s"%(tr,os.environ["MINT"])
+        if d["why"]: d["ok"]=False
 if os.environ.get("MODE")=="--json": print(json.dumps(d,ensure_ascii=False))
 elif d["ok"]: print("OK %s %d"%(d["ip"],d["score"]))
 else: print("%s (%s)"%(d["why"],d["ip"]) if d["ip"] else d["why"])

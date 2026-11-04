@@ -113,6 +113,8 @@ def main():
             print(json.dumps(network.verify()))
         elif action == '--fetch-cleanip':
             print(network.fetch('https://cleanip.io/cli', timeout=6))
+        elif action == '--fetch-iprisk':
+            print(network.fetch('https://ip.net.coffee/api/iprisk/' + ipv4(sys.argv[2]), timeout=8))
         elif action == '--grant':
             print(json.dumps(grant(int(sys.argv[2]), sys.argv[3])))
         elif action == '--status':

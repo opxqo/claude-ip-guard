@@ -61,6 +61,37 @@ class NetworkTests(unittest.TestCase):
             self.assertIs(json.loads(result.stdout)['ok'], expected)
             self.assertEqual(result.returncode, 0 if expected else 1)
 
+    def check(self, risk, error='', trust='80', ip='8.8.8.8'):
+        script = (BIN / 'claude-ip-check').read_text()
+        parser = script.split("/usr/bin/python3 -c '", 1)[1].rsplit("'", 1)[0]
+        raw = f'IP {ip}\nIP 类型 住宅 IP\n网络类型 ISP\nCleanIP 评分 98/100 (A+)\n'
+        env = {**os.environ, 'MIN': '70', 'MINT': trust, 'MODE': '--json', 'COFFEE': '1', 'RISK': risk, 'RISK_ERROR': error}
+        result = subprocess.run(['/usr/bin/python3', '-c', parser], input=raw, text=True, capture_output=True, env=env, timeout=5)
+        return json.loads(result.stdout), result.returncode
+
+    def test_second_provider_must_agree(self):
+        good = {'ip': '8.8.8.8', 'is_datacenter': False, 'isResidential': True, 'is_vpn': False, 'is_proxy': False, 'is_tor': False, 'is_abuser': False, 'trust_score': 100}
+        d, code = self.check(json.dumps(good))
+        self.assertTrue(d['ok']); self.assertEqual((code, d['trust']), (0, 100))
+        for change, text in [({'is_datacenter': True}, 'is_datacenter'), ({'is_vpn': True}, 'is_vpn'), ({'is_abuser': True}, 'is_abuser'),
+                             ({'isResidential': False}, 'not residential'), ({'trust_score': 79}, 'trust 79 < 80'),
+                             ({'trust_score': None}, 'trust None'), ({'ip': '1.1.1.1', 'cidr': '1.1.1.0/24'}, 'different IP'), ({'ip': '1.1.1.1', 'cidr': None}, 'different IP')]:
+            with self.subTest(change=change):
+                d, code = self.check(json.dumps({**good, **change}))
+                self.assertFalse(d['ok']); self.assertEqual(code, 1); self.assertIn(text, d['why']); self.assertIn('net.coffee', d['why'])
+        d, _ = self.check(json.dumps({**good, 'ip': '8.8.8.113', 'cidr': '8.8.8.0/24'}))
+        self.assertTrue(d['ok'])
+        d, _ = self.check(json.dumps({**good, 'isResidential': None, 'asn_kind': 'residential'}))
+        self.assertTrue(d['ok'])
+        d, _ = self.check(json.dumps({**good, 'trust_score': 79}), trust='70')
+        self.assertTrue(d['ok'])
+
+    def test_second_provider_failure_fails_closed(self):
+        for risk, error in [('', 'HTTPS 查询超时（curl 28）'), ('<html>Error 400</html>', ''), ('[]', '')]:
+            with self.subTest(risk=risk):
+                d, code = self.check(risk, error)
+                self.assertFalse(d['ok']); self.assertEqual(code, 1); self.assertTrue(d['why'].startswith('net.coffee: '))
+
     def test_public_ip_validation_and_fallback(self):
         self.assertEqual(net.classify(['8.8.8.8\n', '8.8.8.8']), '8.8.8.8')
         self.assertEqual(net.classify(['bad html', '8.8.8.8'], '8.8.8.8'), '8.8.8.8')

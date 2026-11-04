@@ -1,6 +1,6 @@
 # Claude IP Guard
 
-在启动 Claude Desktop / Claude Code 之前，用 [CleanIP](https://cleanip.io) 检查出口 IP 是否为高分住宅 IP；运行期间持续监控出口 IPv4，一旦变化就关闭 Claude。仅支持 macOS（Apple Silicon，macOS 14+）。
+在启动 Claude Desktop / Claude Code 之前，用 [CleanIP](https://cleanip.io) 和 [ip.net.coffee](https://ip.net.coffee/claude/) 双重检查出口 IP 是否为高分住宅 IP（两家都通过才放行）；运行期间持续监控出口 IPv4，一旦变化就关闭 Claude。仅支持 macOS（Apple Silicon，macOS 14+）。
 
 > 非官方项目，与 Anthropic 和 CleanIP 均无关联。
 
@@ -36,6 +36,12 @@ MIN_SCORE=95
 
 CleanIP 评分必须**高于**该值才放行，范围 0–99，无效值回退为 95。
 
+```
+MIN_TRUST=80
+```
+
+ip.net.coffee 返回的 `trust_score`（0–100）必须**不低于**该值，且没有机房、VPN、代理、Tor、滥用标记，才算通过；无效值回退为 80。
+
 ## 测试
 
 ```bash
@@ -47,6 +53,7 @@ mod 的测试用 `claude plugin test mod/cleanip`。
 
 ## 注意
 
+- ip.net.coffee 用的是它网页内部的接口 `/api/iprisk/<IP>`，没有公开文档，字段随时可能变；它按 /24 缓存，返回的 `ip` 可能是同网段的另一个地址，所以按 `cidr` 匹配。任一家查询失败（重试 3 次后）都按失败处理。
 - 依赖 `https://cleanip.io/cli` 的纯文本输出格式。官方改字段名时，`bin/claude-ip-check` 和 `mod/cleanip/hooks/register.tsx` 里各有一份解析规则，需要同时更新。
 - 强制放行只跳过 CleanIP 的评分与住宅判定，仍要求出口探测成功且监控健康，并且需要在原生对话框里确认两次。
 - 源码里的 `__HOME__` 由 `install.sh` 替换为你的用户目录。
