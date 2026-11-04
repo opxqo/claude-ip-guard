@@ -84,6 +84,9 @@ final class Model: ObservableObject {
     @Published var report: Report?
     @Published var failure: String?
     @Published var forcing = false
+    // All checks passed; waiting for the user to press 启动 Claude before the monitor and Claude are started.
+    @Published var awaiting = false
+    private var passed: (ip: String, at: Date)?
 
     @MainActor func forceLaunch() {
         guard !forcing, let why = failure, confirmForce(why) else { return }
@@ -129,6 +132,8 @@ final class Model: ObservableObject {
         steps = Array(repeating: .waiting, count: 5)
         report = nil
         failure = nil
+        awaiting = false
+        passed = nil
         min = Model.minScore
         steps[0] = .running
         DispatchQueue.global().async {
@@ -155,18 +160,28 @@ final class Model: ObservableObject {
             after(0.35) {
                 guard r.ok, let ip = r.ip else { return self.fail(2, self.reason(r)) }
                 self.steps[2] = .done
-                self.steps[3] = .running
-                after(0.3) {
-                    guard Self.startWatcher(ip) else { return self.fail(3, "IP 监听启动失败") }
-                    self.steps[3] = .done
-                    self.steps[4] = .running
-                    NSWorkspace.shared.openApplication(at: claudeApp, configuration: .init()) { _, err in
-                        DispatchQueue.main.async {
-                            if let err { return self.fail(4, "无法打开 Claude:\(err.localizedDescription)") }
-                            self.steps[4] = .done
-                            after(1.0) { NSApp.terminate(nil) }
-                        }
-                    }
+                self.passed = (ip, Date())
+                self.awaiting = true
+            }
+        }
+    }
+
+    /// Called when the user confirms. The monitor is only started now: it exits on its own if no Claude shows up within a minute.
+    func confirmLaunch() {
+        guard awaiting, let p = passed else { return }
+        awaiting = false
+        // A verdict older than two minutes is stale: check again instead of launching on it.
+        if Date().timeIntervalSince(p.at) > 120 { return run() }
+        steps[3] = .running
+        after(0.3) {
+            guard Self.startWatcher(p.ip) else { return self.fail(3, "IP 监听启动失败，出口可能已变化，请重新检测") }
+            self.steps[3] = .done
+            self.steps[4] = .running
+            NSWorkspace.shared.openApplication(at: claudeApp, configuration: .init()) { _, err in
+                DispatchQueue.main.async {
+                    if let err { return self.fail(4, "无法打开 Claude:\(err.localizedDescription)") }
+                    self.steps[4] = .done
+                    after(1.0) { NSApp.terminate(nil) }
                 }
             }
         }
@@ -283,6 +298,15 @@ struct Splash: View {
                 .background(accent.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
                 .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(accent.opacity(0.25)))
 
+            if model.awaiting {
+                HStack {
+                    Text("检测通过，确认后启动 Claude").font(.system(size: 12)).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("取消") { NSApp.terminate(nil) }.keyboardShortcut(.cancelAction)
+                    Button("启动 Claude") { model.confirmLaunch() }.keyboardShortcut(.defaultAction)
+                }
+            }
+
             if model.isFailed {
                 HStack {
                     Button("强制启动…") { model.forceLaunch() }.disabled(model.forcing)
@@ -360,6 +384,7 @@ func appIcon() -> NSImage? {
     coffee.why = "net.coffee: trust 55 < 80"
     let cases: [(String, Report, [StepState], String?)] = [
         ("splash-pass", ok, [.done, .done, .done, .done, .done], nil),
+        ("splash-confirm", ok, [.done, .done, .done, .waiting, .waiting], nil),
         ("splash-fail", bad, [.done, .failed, .waiting, .waiting, .waiting], Model().reason(bad)),
         ("splash-running", ok, [.done, .done, .done, .running, .waiting], nil),
         ("splash-coffee-fail", coffee, [.done, .done, .failed, .waiting, .waiting], coffee.why),
@@ -370,6 +395,7 @@ func appIcon() -> NSImage? {
             m.report = r
             m.steps = steps
             m.failure = why
+            m.awaiting = name == "splash-confirm"
             let view = Splash(model: m, icon: appIcon()).padding(20).environment(\.colorScheme, scheme)
             let renderer = ImageRenderer(content: view)
             renderer.scale = 2

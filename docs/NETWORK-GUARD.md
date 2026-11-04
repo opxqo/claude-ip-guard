@@ -4,7 +4,7 @@ This local guard protects Claude Code and its Claude Desktop host. It does not t
 
 ## Entry points
 
-- `Claude (IP Guard).app`: checks CleanIP, waits for a healthy monitor with the same public IPv4, then opens Claude Desktop.
+- `Claude (IP Guard).app`: checks CleanIP and ip.net.coffee, then waits for the user to press 启动 Claude. Only after that does it start the monitor, wait for it to be healthy with the same public IPv4, and open Claude Desktop. A passing verdict older than 2 minutes is discarded and the check runs again.
 - `claude-guard`: the terminal gate uses the same checker and readiness handshake.
 - `cleanip@local-mods`: uses the shared checker at session start, verifies live egress before accepting a prompt, and checks monitoring/authorization before each model step. Errors in the gating hooks fail closed.
 - `claude-desktop-guard`: delegates to the native launcher.
