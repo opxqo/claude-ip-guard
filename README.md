@@ -11,7 +11,7 @@
 | 目录 | 内容 |
 |---|---|
 | `bin/` | `claude-ip-check`（CleanIP 评分与住宅判定）、`claude-ip-watch`（出口监控，暂停重试后才关闭）、`claude-ip-override`（强制放行授权与就绪检查）、`claude_network.py`（共用的网络查询）、`claude-guard`（终端入口）、`claude-desktop-guard` |
-| `launcher/` | `Claude (IP Guard).app` 的 Swift 源码与构建脚本，以及 Python 测试 |
+| `launcher/` | `Claude (IP Guard).app` 的 Swift 源码与构建脚本、菜单栏状态 `Claude Net Monitor.app`（`ClaudeNetBar.swift`），以及 Python 测试 |
 | `mod/cleanip/` | Claude Code mod：会话开始、提交提示和每个模型步骤前都会校验 |
 | `config/` | `ip-guard.conf.example`，评分门槛 `MIN_SCORE` |
 | `docs/` | 设计说明与限制 |
@@ -24,7 +24,7 @@
 ./install.sh
 ```
 
-脚本会把文件装到 `~/.claude/`，并构建 `~/Applications/Claude (IP Guard).app`。它**不会**修改 `settings.json` 或 shell 配置，脚本结束时会列出需要手动执行的步骤：注册并启用 mod、给终端加 alias。
+脚本会把文件装到 `~/.claude/`，并构建 `~/Applications/Claude (IP Guard).app` 和 `~/Applications/Claude Net Monitor.app`。它**不会**修改 `settings.json` 或 shell 配置，脚本结束时会列出需要手动执行的步骤：注册并启用 mod、给终端加 alias。
 
 ## 配置
 
@@ -42,11 +42,34 @@ MIN_TRUST=80
 
 ip.net.coffee 返回的 `trust_score`（0–100）必须**不低于**该值，且没有机房、VPN、代理、Tor、滥用标记，才算通过；无效值回退为 80。
 
+## 菜单栏状态
+
+`Claude Net Monitor.app` 在屏幕顶部菜单栏常驻一个圆点，每秒读取 `~/.claude/run/ip-watch-health.json`，并在文件变化时立即刷新：
+
+| 圆点 | 含义 |
+|---|---|
+| 🟢 `● 48.46.13.217` | 监控健康，出口与基准一致（心跳 ≤ 10 秒） |
+| 🟠 `● 重试 n · 剩 xs` | 出口查询失败，Claude 已暂停，正在重试 |
+| 🔴 `● 已断开` / `● 失联` | 出口已变化、Claude 已被关闭，或监控进程消失、心跳过期 |
+| ⚪ `● 未监控` | Claude 没在运行，监控已退出 |
+
+点开可以看到基准 IP、心跳、重试与暂停的进程数、失败原因、近 24 小时的暂停和关闭次数，以及最近 8 条事件。菜单里还能打开日志和说明、复制 IP、切换开机自启（写入 `~/Library/LaunchAgents/local.claude-netbar.plist`，首次启动时默认开启）。它只读文件，不向任何进程发信号。启动器每次打开 Claude 前会顺带把它拉起来。
+
 ## 测试
 
 ```bash
 python3 launcher/tests/test_network.py
 python3 launcher/tests/test_network_retry.py
+```
+
+菜单栏状态的自测（状态映射与日志解析）和各状态的截图：
+
+```bash
+~/Applications/Claude\ Net\ Monitor.app/Contents/MacOS/ClaudeNetBar --selftest
+```
+
+```bash
+~/Applications/Claude\ Net\ Monitor.app/Contents/MacOS/ClaudeNetBar --snapshot /tmp/netbar
 ```
 
 mod 的测试用 `claude plugin test mod/cleanip`。

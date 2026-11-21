@@ -9,6 +9,10 @@ This local guard protects Claude Code and its Claude Desktop host. It does not t
 - `cleanip@local-mods`: uses the shared checker at session start, verifies live egress before accepting a prompt, and checks monitoring/authorization before each model step. Errors in the gating hooks fail closed.
 - `claude-desktop-guard`: delegates to the native launcher.
 
+## Menu bar status
+
+`Claude Net Monitor.app` (`launcher/ClaudeNetBar.swift`) shows the monitor in the macOS menu bar. It reads `ip-watch-health.json` every second and on directory change, and applies the same freshness rule as `claude_network.health()`: green only when the state is healthy, the heartbeat is at most 10 seconds old and the monitor PID exists (`kill(pid, 0)`). Retrying is orange with the remaining grace window; blocked, a stale heartbeat or a missing monitor process is red; stopped or no file is grey. The menu summarises `ip-watch.log` (pause runs folded with their RESUME or KILL, 24-hour counts). It is display only: it sends no signals, writes nothing the guard reads, and its state never gates Claude. The launcher opens it before Claude; a LaunchAgent (`local.claude-netbar`, toggled from the menu) opens it at login.
+
 ## Network transport and monitor
 
 `claude_network.py` is the common transport for CleanIP and exit-IP queries. It explicitly uses the current system HTTPS proxy when enabled, otherwise inherits the process proxy environment and OS route (including TUN). PAC-only or SOCKS-only system proxy configurations are rejected rather than silently queried through a different path. HTTPS certificate verification remains enabled and redirects cannot downgrade to HTTP. Probes use IPv4.

@@ -13,6 +13,11 @@ echo "scripts   -> $C/bin"
 cp launcher/ClaudeIPGuard.swift launcher/build.sh launcher/AppIcon.icns launcher/AppIcon.png "$C/launcher/"
 "$C/launcher/build.sh"
 
+# Menu bar status for the monitor (read-only). The launcher opens it before Claude.
+cp launcher/ClaudeNetBar.swift launcher/build-netbar.sh "$C/launcher/"
+"$C/launcher/build-netbar.sh"
+open -g "$HOME/Applications/Claude Net Monitor.app"
+
 # Threshold config: never overwrite an existing one.
 [[ -f "$C/ip-guard.conf" ]] || cp config/ip-guard.conf.example "$C/ip-guard.conf"
 

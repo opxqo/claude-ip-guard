@@ -10,6 +10,16 @@ let checkTool = "\(home)/.claude/bin/claude-ip-check"
 let watchTool = "\(home)/.claude/bin/claude-ip-watch"
 let claudeApp = URL(fileURLWithPath: "/Applications/Claude.app")
 let overrideTool = "\(home)/.claude/bin/claude-ip-override"
+let netBarApp = URL(fileURLWithPath: "\(home)/Applications/Claude Net Monitor.app")
+
+/// Brings up the read-only menu bar status (if installed and not running). Never blocks or fails the launch.
+func openNetBar() {
+    guard FileManager.default.fileExists(atPath: netBarApp.path),
+          NSRunningApplication.runningApplications(withBundleIdentifier: "local.claude-netbar").isEmpty else { return }
+    let config = NSWorkspace.OpenConfiguration()
+    config.activates = false
+    NSWorkspace.shared.openApplication(at: netBarApp, configuration: config) { _, _ in }
+}
 
 func helper(_ arguments: [String]) -> String? {
     let p = Process()
@@ -104,6 +114,7 @@ final class Model: ObservableObject {
                     self.forcing = false
                     return
                 }
+                openNetBar()
                 let wasRunning = NSRunningApplication.runningApplications(withBundleIdentifier: "com.anthropic.claudefordesktop").isEmpty == false
                 NSWorkspace.shared.openApplication(at: claudeApp, configuration: .init()) { app, err in
                     guard let app, err == nil else {
@@ -177,6 +188,7 @@ final class Model: ObservableObject {
             guard Self.startWatcher(p.ip) else { return self.fail(3, "IP 监听启动失败，出口可能已变化，请重新检测") }
             self.steps[3] = .done
             self.steps[4] = .running
+            openNetBar()
             NSWorkspace.shared.openApplication(at: claudeApp, configuration: .init()) { _, err in
                 DispatchQueue.main.async {
                     if let err { return self.fail(4, "无法打开 Claude:\(err.localizedDescription)") }
