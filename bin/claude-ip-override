@@ -21,7 +21,7 @@ def process(pid):
     parts = p.stdout.strip().split(None, 6)
     if p.returncode or len(parts) != 7:
         return None
-    return {'parent': int(parts[0]), 'started': ' '.join(parts[1:6]), 'command': parts[6]}
+    return {'parent': int(parts[0]), 'started': ' '.join(parts[1:6]), 'command': network.executable(pid, parts[6])}
 
 
 def is_claude(info):

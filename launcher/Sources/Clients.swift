@@ -5,8 +5,17 @@ import Darwin
 struct ClientCounts: Decodable, Equatable {
     var desktop = 0           // Claude.app main processes
     var desktop_sessions = 0  // Claude Code sessions inside the desktop app
-    var cli = 0               // terminal CLI sessions
+    var cli = 0               // CLI sessions not inside the desktop app
+    var cli_sources: [String: Int]? = nil  // app that started each CLI session (Terminal, T3 Code, …)
     var processes = 0         // everything a kill would close
+}
+
+/// "Terminal ×2 · T3 Code (Beta)": most sessions first, then by name.
+func cliSummary(_ sources: [String: Int]) -> String {
+    sources.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
+        .map { (name: $0.key.replacingOccurrences(of: #"\s*\([^)]*\)$"#, with: "", options: .regularExpression), n: $0.value) }
+        .map { $0.n > 1 ? "\($0.name) ×\($0.n)" : $0.name }
+        .joined(separator: " · ")
 }
 
 enum Clients {

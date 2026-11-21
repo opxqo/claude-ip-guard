@@ -223,7 +223,7 @@ class NetworkTests(unittest.TestCase):
                 12: (10, home + '/Library/Application Support/Claude/claude-code/2/x/claude.app/Contents/MacOS/claude'),
                 20: (1, '/bin/zsh'), 21: (20, home + '/.local/bin/claude'), 22: (21, '/bin/zsh'),
                 30: (1, '/Applications/Codex.app/Contents/MacOS/Codex')}
-        self.assertEqual(watch.clients(rows), {'desktop': 1, 'desktop_sessions': 1, 'cli': 1, 'processes': 5})
+        self.assertEqual(watch.clients(rows), {'desktop': 1, 'desktop_sessions': 1, 'cli': 1, 'cli_sources': {'其他': 1}, 'processes': 5})
 
     def test_kill_all_signals_only_claude_targets_and_logs(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(net, 'ROOT', Path(tmp)), patch.object(watch, 'targets', return_value={10: 'c', 11: 'c'}), patch.object(net, 'process_identity', return_value='birth'), patch.object(watch.os, 'kill') as kill:
@@ -273,5 +273,34 @@ class NetworkTests(unittest.TestCase):
         with patch.object(override, 'process', return_value=dict(parent=1, command='/bin/zsh', started='x')):
             with self.assertRaises(ValueError): override.session_begin('8.8.8.8', 'forced')
             with self.assertRaises(ValueError): override.session_end()
+
+    def test_executable_resolves_a_process_started_through_path(self):
+        child = subprocess.Popen(['sleep', '30'])  # argv[0] without a path, like T3 Code's `claude`
+        try:
+            shown = subprocess.check_output(['/bin/ps', '-p', str(child.pid), '-o', 'comm='], text=True).strip()
+            self.assertNotIn('/', shown)
+            self.assertEqual(net.executable(child.pid, shown), '/bin/sleep')
+            self.assertEqual(net.executable(child.pid, '/already/absolute'), '/already/absolute')
+        finally:
+            child.kill(); child.wait()
+        self.assertEqual(net.executable(child.pid, 'gone'), 'gone')
+
+    def test_bare_claude_started_by_another_app_is_a_cli_target(self):
+        versions = str(Path.home() / '.local/share/claude/versions/2.1.330')
+        rows = '19394 1 /Applications/T3 Code (Beta).app/Contents/MacOS/T3 Code (Beta)\n51144 19394 claude\n51150 51144 /bin/zsh\n'
+        with patch.object(watch.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, rows, '')), \
+             patch.object(net, 'executable', side_effect=lambda pid, shown: versions if shown == 'claude' else shown):
+            self.assertEqual(set(watch.targets()), {51144, 51150})
+            self.assertEqual(watch.clients()['cli'], 1)
+            self.assertEqual(watch.clients()['cli_sources'], {'T3 Code (Beta)': 1})
+
+    def test_cli_sources_name_the_launching_app(self):
+        home = str(Path.home())
+        cli = home + '/.local/bin/claude'
+        rows = {5: (1, '/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal'), 6: (5, '/usr/bin/login'),
+                7: (6, '/bin/zsh'), 8: (7, cli), 9: (7, cli),
+                20: (1, '/Applications/Warp.app/Contents/MacOS/stable'), 21: (20, '/bin/zsh'), 22: (21, cli),
+                30: (1, '/usr/sbin/sshd'), 31: (30, cli)}
+        self.assertEqual(watch.clients(rows)['cli_sources'], {'Terminal': 2, 'Warp': 1, '其他': 1})
 
 if __name__ == '__main__': unittest.main(verbosity=2)

@@ -209,6 +209,8 @@ func selftest() -> Int32 {
     check(routeFor("https://example.com/v1", listening: { _, _ in true }).kind == .custom, "custom endpoint")
     check(baseURL(fromSettings: Data(#"{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:1"}}"#.utf8)) == "http://127.0.0.1:1", "settings base URL")
     check(shellQuote("a'b") == "'a'\\''b'", "shell quoting")
+    check(cliSummary(["T3 Code (Beta)": 1]) == "T3 Code", "cli source: single, suffix dropped")
+    check(cliSummary(["Warp": 1, "Terminal": 2, "Alpha": 1]) == "Terminal ×2 · Alpha · Warp", "cli source: order and count")
     print(failures == 0 ? "all passed" : "\(failures) failed")
     return failures == 0 ? 0 : 1
 }
@@ -252,7 +254,7 @@ func selftest() -> Int32 {
         m.health = Health(pid: 1, ip: pass.ip, heartbeat: now.timeIntervalSince1970 - 1, state: level == .retry ? "retrying" : "healthy",
                           retry_count: 2, paused_count: 9, latency_ms: level == .retry ? nil : 236)
         m.status = level == .retry ? Status(level: .retry, title: "重试 2 · 剩 26s", label: "网络波动 · 已暂停 9 个进程") : Status(level: .ok, title: pass.ip!, label: "网络稳定")
-        m.clients = ClientCounts(desktop: 1, desktop_sessions: 3, cli: 2, processes: 41)
+        m.clients = ClientCounts(desktop: 1, desktop_sessions: 3, cli: 3, cli_sources: ["Terminal": 2, "T3 Code (Beta)": 1], processes: 41)
     }
     let cases: [(String, CGFloat, GuardModel, Bool)] = [
         ("flow-checking", 420, model { m in m.phase = .checking; m.steps = [.done, .running, .waiting, .waiting] }, false),

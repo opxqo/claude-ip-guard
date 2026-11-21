@@ -32,7 +32,7 @@ def process_table():
     for line in result.stdout.splitlines():
         p = line.strip().split(None, 2)
         if len(p) == 3:
-            rows[int(p[0])] = (int(p[1]), p[2])
+            rows[int(p[0])] = (int(p[1]), net.executable(int(p[0]), p[2]))
     return rows
 
 
@@ -49,8 +49,18 @@ def clients(rows=None):
     cli = [pid for pid, (_, cmd) in rows.items() if is_root(cmd) and cmd != DESKTOP
            and not any(a in rows and is_root(rows[a][1]) for a in ancestors(pid))]
     embedded = [pid for pid, (_, cmd) in rows.items() if is_root(cmd) and cmd != DESKTOP and pid not in cli]
+    sources = {}
+    for pid in cli:
+        name = next((app_name(rows[a][1]) for a in ancestors(pid) if a in rows and app_name(rows[a][1])), '其他')
+        sources[name] = sources.get(name, 0) + 1
     return {'desktop': len(desktop), 'desktop_sessions': len(embedded), 'cli': len(cli),
-            'processes': len(targets(rows))}
+            'cli_sources': sources, 'processes': len(targets(rows))}
+
+
+def app_name(cmd):
+    """'/Applications/T3 Code (Beta).app/Contents/MacOS/…' -> 'T3 Code (Beta)'; None outside an app bundle."""
+    head, sep, _ = cmd.partition('.app/Contents/')
+    return Path(head).name if sep else None
 
 
 def targets(rows=None):

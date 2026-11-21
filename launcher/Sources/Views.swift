@@ -244,7 +244,7 @@ struct ClientRow: View {
                 Text(name).font(.system(size: 12.5, weight: .medium))
                 HStack(spacing: 4) {
                     Circle().fill(running ? Palette.ok : Palette.idle.opacity(0.6)).frame(width: 5, height: 5)
-                    Text(detail).font(.system(size: 10.5)).foregroundStyle(.secondary)
+                    Text(detail).font(.system(size: 10.5)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
                 }
             }
             Spacer()
@@ -265,7 +265,8 @@ struct ClientsCard: View {
                       detail: c.desktop > 0 ? "运行中 · \(c.desktop_sessions) 个 Code 会话" : "未运行",
                       running: c.desktop > 0, action: c.desktop > 0 ? "切换" : "启动", enabled: active, perform: m.launchDesktop)
             ClientRow(symbol: "terminal", name: "Claude Code CLI",
-                      detail: c.cli > 0 ? "运行中 · \(c.cli) 个终端会话" : "在 \(Clients.Terminal(rawValue: m.terminal)?.title ?? "Terminal") 中打开",
+                      detail: c.cli > 0 ? "运行中 · " + (c.cli_sources.map(cliSummary).flatMap { $0.isEmpty ? nil : $0 } ?? "\(c.cli) 个会话")
+                                        : "在 \(Clients.Terminal(rawValue: m.terminal)?.title ?? "Terminal") 中打开",
                       running: c.cli > 0, action: "新建", enabled: active, perform: m.launchCLI)
             if let msg = m.route.message {
                 Label(msg, systemImage: m.route.kind == .localDown ? "exclamationmark.triangle.fill" : "info.circle.fill")

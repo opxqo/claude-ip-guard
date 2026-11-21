@@ -1,5 +1,6 @@
 """Shared transport and readiness checks for the Claude IP guard."""
 import concurrent.futures
+import ctypes
 import hashlib
 import ipaddress
 import json
@@ -15,6 +16,23 @@ URLS = ('https://api.ipify.org', 'https://ipv4.icanhazip.com', 'https://checkip.
 FRESH_HEARTBEAT = 5
 HEALTH = ROOT / 'ip-watch-health.json'
 CONFIG = Path.home() / '.claude/ip-guard.conf'
+_libproc = None
+
+
+def executable(pid, shown):
+    """The real executable of a process. ps shows argv[0], so a Claude Code started through PATH
+    (T3 Code, IDE plugins, scripts: plain `claude`) has no path; resolve it with proc_pidpath."""
+    if '/' in shown:
+        return shown
+    global _libproc
+    try:
+        if _libproc is None:
+            _libproc = ctypes.CDLL('/usr/lib/libproc.dylib')
+        buf = ctypes.create_string_buffer(4096)
+        n = _libproc.proc_pidpath(ctypes.c_int(int(pid)), buf, ctypes.c_uint32(4096))
+        return buf.value.decode('utf-8', 'replace') if n > 0 else shown
+    except (OSError, ValueError, AttributeError):
+        return shown
 
 
 def unstable_policy():
