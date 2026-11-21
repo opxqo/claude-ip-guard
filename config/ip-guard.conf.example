@@ -1,8 +1,6 @@
-# 住宅 IP 启动门槛:CleanIP 评分必须「高于」这个数才放行(范围 0–99)。
-# 改完直接保存即可:下次从启动器或终端启动时生效;Claude 里的状态行插件下次会话生效。
-MIN_SCORE=95
-
-# ip.net.coffee 的 trust_score（0–100）必须不低于这个数才放行；两家检测都通过才算通过。
+# 启动检测以 ip.net.coffee 为准（与 https://ip.net.coffee/claude/ 同一方法）：
+# 取 claude.ai 看到的出口 IP，trust_score（0–100）必须不低于这个数，且是住宅 IP、没有机房/VPN/代理/Tor/滥用标记、
+# 不在 Claude 不提供服务的地区，通用出口也必须与 Claude 出口一致。CleanIP 的分数只作参考，不影响放行。
 MIN_TRUST=80
 
 # 网络波动（查不到出口 IP，但 IP 没有确认变化）时的处理：

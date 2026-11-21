@@ -56,7 +56,9 @@ const gauge = (score: number) => {
 const tag = (s?: string) => s?.replace(/\s*IP$/, '')
 
 export const statusLine = (r: Report): string => {
-  const score = r.score === undefined ? '' : ` ${r.score}${r.grade ? ` ${r.grade}` : ''} ${gauge(r.score)}`
+  // ip.net.coffee's trust score decides; CleanIP's score is only shown when there is no trust score.
+  const score = typeof r.trust === 'number' ? ` 可信 ${r.trust} ${gauge(r.trust)}`
+    : r.score === undefined ? '' : ` ${r.score}${r.grade ? ` ${r.grade}` : ''} ${gauge(r.score)}`
   const head = score.trim()
   if (!r.ok) return [`${head ? `${head} ` : ''}⛔ 未通过`, r.why, r.ip].filter(Boolean).join(' · ')
   const tags = [tag(r.native), tag(r.type), r.network].filter(Boolean).join(' · ')

@@ -1,6 +1,6 @@
 {
   "name": "cleanip",
-  "version": "0.5.0",
-  "description": "Checks CleanIP and a fixed egress IPv4 at session start, monitors exit IP and heartbeat, and gates prompts and model requests. Reuses a Claude IP Guard console session (verified or forced); outside the console, a confirmed process-scoped override.",
+  "version": "0.6.0",
+  "description": "Checks Claude's exit IP with ip.net.coffee (CleanIP for reference) and a fixed egress IPv4 at session start, monitors exit IP and heartbeat, and gates prompts and model requests. Reuses a Claude IP Guard console session (verified or forced); outside the console, a confirmed process-scoped override.",
   "types": "./types/index.d.ts"
 }

@@ -12,6 +12,10 @@ import time
 ROOT = Path.home() / '.claude/run'
 WATCH = Path.home() / '.claude/bin/claude-ip-watch'
 URLS = ('https://api.ipify.org', 'https://ipv4.icanhazip.com', 'https://checkip.amazonaws.com')
+# The exit Anthropic itself sees: Claude Code talks to api.anthropic.com, the desktop app to claude.ai.
+CLAUDE_URLS = ('https://api.anthropic.com/cdn-cgi/trace', 'https://claude.ai/cdn-cgi/trace')
+RESTRICTED = {'CN': '中国大陆', 'HK': '香港', 'MO': '澳门', 'RU': '俄罗斯', 'KP': '朝鲜', 'IR': '伊朗',
+              'SY': '叙利亚', 'CU': '古巴', 'BY': '白俄罗斯', 'VE': '委内瑞拉'}
 # A heartbeat this young was published after a passing probe, so a prompt check can reuse it.
 FRESH_HEARTBEAT = 5
 HEALTH = ROOT / 'ip-watch-health.json'
@@ -161,21 +165,47 @@ def classify(values, expected=None):
     return ips[0]
 
 
+def trace(text):
+    """Fields of a Cloudflare /cdn-cgi/trace answer (ip=…, loc=…)."""
+    return dict(line.split('=', 1) for line in (text or '').splitlines() if '=' in line)
+
+
+def classify_claude(generic, claude, expected=None):
+    """The exit Claude's own hosts see must be answered and equal the generic exit: a proxy rule
+    that routes claude.ai / api.anthropic.com elsewhere (split routing) counts as a change."""
+    ip = classify(generic, expected)
+    seen = []
+    for text in claude:
+        value = trace(text).get('ip', '')
+        try:
+            if ipaddress.IPv4Address(value).is_global:
+                seen.append(value)
+        except ValueError:
+            pass
+    if not seen:
+        raise ProbeUnavailable('Claude 出口（api.anthropic.com / claude.ai）未返回有效公网 IPv4')
+    if any(v != ip for v in seen):
+        raise ExitChanged('Claude 出口 %s 与通用出口 %s 不一致（分流）' % ('/'.join(sorted(set(seen))), ip))
+    return ip
+
+
 def probe(expected=None):
     ctx = transport()
     def read(url):
         try: return fetch(url, context=ctx), ''
         except (ValueError, subprocess.TimeoutExpired) as exc:
             return '', str(exc)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(URLS)) as pool:
-        results = list(pool.map(read, URLS))
+    urls = URLS + CLAUDE_URLS
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(urls)) as pool:
+        results = list(pool.map(read, urls))
     if transport()[1] != ctx[1]:
         raise ProbeUnavailable('检测期间代理配置发生变化，请重试')
+    generic, claude = results[:len(URLS)], results[len(URLS):]
     try:
-        return classify([value for value, _ in results], expected), ctx[1]
+        return classify_claude([v for v, _ in generic], [v for v, _ in claude], expected), ctx[1]
     except ProbeUnavailable as exc:
         details = '; '.join('%s: %s' % (url.split('/')[2], error or '响应不是有效公网 IPv4')
-                            for url, (_, error) in zip(URLS, results))
+                            for url, (_, error) in zip(urls, results) if error or url in URLS)
         raise ProbeUnavailable(str(exc) + '；' + details) from None
 
 

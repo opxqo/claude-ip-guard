@@ -1,76 +1,182 @@
-#!/bin/zsh
-# CleanIP + ip.net.coffee gate. Exit 0 only if CleanIP score > MIN and residential AND ip.net.coffee agrees. Fail-closed.
-#   claude-ip-check          -> "OK <ip> <score>" or a reason
-#   claude-ip-check --json   -> one JSON line: ok, why, ip, score, grade, type, native, network, location
-# Thresholds live in ~/.claude/ip-guard.conf (MIN_SCORE=<0-99>, MIN_TRUST=<0-100>); invalid values fall back to 95 / 80.
-MIN=$(sed -n 's/^MIN_SCORE=\([0-9][0-9]*\)[[:space:]]*$/\1/p' "$HOME/.claude/ip-guard.conf" 2>/dev/null | tail -1)
-[[ -n $MIN && $MIN -le 99 ]] || MIN=95
-# Second opinion from ip.net.coffee: its trust_score must be >= MIN_TRUST (default 80, range 0-100).
-MINT=$(sed -n 's/^MIN_TRUST=\([0-9][0-9]*\)[[:space:]]*$/\1/p' "$HOME/.claude/ip-guard.conf" 2>/dev/null | tail -1)
-[[ -n $MINT && $MINT -le 100 ]] || MINT=80
-# A failed lookup (network error, timeout) is retried; a clear verdict from CleanIP is never retried.
-for attempt in 1 2 3; do
-  r=$("$HOME/.claude/bin/claude-ip-override" --fetch-cleanip 2>&1)
-  lookup_status=$?
-  (( lookup_status == 0 )) && break
-  (( attempt < 3 )) && sleep 2
-done
-lookup_error=''
-if (( lookup_status != 0 )); then lookup_error=$r; r=''; fi
-# Both providers must agree. Look up the IP CleanIP reported; a failed lookup is retried, then fails closed.
-risk=''; risk_error=''
-cip=$(printf '%s' "$r" | sed $'s/\e\\[[0-9;]*m//g' | sed -n 's/^[[:space:]]*IP[[:space:]][[:space:]]*\([0-9][0-9.]*\)\([[:space:]].*\)\{0,1\}$/\1/p' | head -1)
-if [[ -n $cip ]]; then
-  for attempt in 1 2 3; do
-    risk=$("$HOME/.claude/bin/claude-ip-override" --fetch-iprisk "$cip" 2>&1) && { risk_error=''; break; }
-    risk_error=$risk; risk=''
-    (( attempt < 3 )) && sleep 2
-  done
-fi
-printf '%s' "$r" | MIN=$MIN MINT=$MINT COFFEE=1 RISK="$risk" RISK_ERROR="$risk_error" MODE="$1" LOOKUP_ERROR="$lookup_error" /usr/bin/python3 -c '
-import sys,re,os,json,ipaddress
-t=re.sub(r"\x1b\[[0-9;]*m","",sys.stdin.read())
-def f(*labels):
-    for label in labels:
-        m=re.search(r"^\s*"+label+r"\s+(.+?)\s*$",t,re.M)
-        if m: return re.sub(r"\s+"," ",m.group(1).replace("[","").replace("]","")).strip()
-    return None
-ip=re.search(r"^\s*IP\s+([0-9a-fA-F:.]+)(?:\s|$)",t,re.M)
-sc=re.search(r"CleanIP\s*评分.*?(\d+)\s*/\s*100(?:\s*\((\S+?)\))?",t)
-raw_type=f("IP 类型","IP类型","类型")
-network=f("网络类型","网络")
-ty=raw_type
-# Current CLI can report an unknown IP type alongside an explicit residential network.
-# Use that network only as a fallback; a known non-residential IP type still blocks.
-if raw_type in (None, "未知类型", "未知") and re.sub(r"\s+", "", network or "") == "住宅IP":
-    ty="住宅 IP"
-d={"min":int(os.environ["MIN"]),"ok":False,"why":None,"ip":ip.group(1) if ip else None,"score":int(sc.group(1)) if sc else None,
-   "grade":sc.group(2) if sc else None,"type":ty,"ip_type":raw_type,"native":f("原生 / 广播"),"network":network,"location":f("归属地")}
-MIN=int(os.environ["MIN"])
-if not (ip and sc and ty):
-    miss=[n for n,v in (("IP",ip),("评分",sc),("类型",ty)) if not v]
-    d["why"]=os.environ.get("LOOKUP_ERROR") or ("lookup failed or format changed (missing: %s)"%",".join(miss) if t.strip() else "lookup failed (empty response)")
-elif d["score"]<=MIN: d["why"]="score %d <= %d"%(d["score"],MIN)
-elif "住宅" not in ty: d["why"]="not residential: %s"%ty
-else: d["ok"]=True
-# Second provider (ip.net.coffee). Skipped only when the caller does not set COFFEE (unit tests).
-if d["ok"] and os.environ.get("COFFEE"):
-    try: rk=json.loads(os.environ.get("RISK") or "")
-    except ValueError: rk=None
-    if not isinstance(rk,dict):
-        d["ok"]=False; d["why"]="net.coffee: "+(os.environ.get("RISK_ERROR") or "lookup failed")
+#!/usr/bin/python3
+"""Launch check, same method as https://ip.net.coffee/claude/ . Fail-closed.
+
+1. The exit IP Claude sees: https://claude.ai/cdn-cgi/trace (ip=, loc=).
+2. Its risk at ip.net.coffee (/api/iprisk/<ip>): residential, no datacenter/VPN/proxy/Tor/abuser flag,
+   trust_score >= MIN_TRUST, not in a region Claude does not serve.
+3. The generic exit (ipify, icanhazip, amazonaws) and api.anthropic.com must agree with it (no split routing).
+CleanIP (https://cleanip.io/cli) is fetched alongside for reference only and never decides the verdict.
+
+  claude-ip-check          -> "OK <ip> trust <n>" or a reason
+  claude-ip-check --json   -> one JSON line (see report())
+Thresholds live in ~/.claude/ip-guard.conf: MIN_TRUST=<0-100> (default 80).
+"""
+import concurrent.futures
+import ipaddress
+import json
+import re
+import sys
+import time
+import claude_network as net
+
+FLAGS = (('is_datacenter', '机房'), ('is_vpn', 'VPN'), ('is_proxy', '代理'), ('is_tor', 'Tor'), ('is_abuser', '滥用'))
+
+
+def min_trust():
+    try:
+        text = net.CONFIG.read_text()
+    except OSError:
+        return 80
+    for line in reversed(text.splitlines()):
+        m = re.fullmatch(r'\s*MIN_TRUST=(\d+)\s*', line)
+        if m and int(m.group(1)) <= 100:
+            return int(m.group(1))
+    return 80
+
+
+def retry(fn, attempts=3, wait=2):
+    """Retries a failed lookup (network error, timeout, unparsable answer); returns (value, error)."""
+    error = ''
+    for i in range(attempts):
+        try:
+            return fn(), ''
+        except (ValueError, KeyError, TypeError, OSError) as exc:
+            error = str(exc) or type(exc).__name__
+            if i < attempts - 1:
+                time.sleep(wait)
+    return None, error
+
+
+def claude_exit():
+    t = net.trace(net.fetch('https://claude.ai/cdn-cgi/trace', timeout=8))
+    if not t.get('ip'):
+        raise ValueError('claude.ai 未返回出口 IP')
+    return {'ip': t['ip'], 'loc': (t.get('loc') or '').upper()}
+
+
+def iprisk(ip):
+    d = json.loads(net.fetch('https://ip.net.coffee/api/iprisk/' + ip, timeout=10))
+    if not isinstance(d, dict):
+        raise ValueError('ip.net.coffee 返回格式异常')
+    return d
+
+
+def cleanip_reference(text):
+    """CleanIP's plain-text card -> reference fields (score, grade, type, native, network, location, ip)."""
+    t = re.sub(r'\x1b\[[0-9;]*m', '', text or '')
+    def field(*labels):
+        for label in labels:
+            m = re.search(r'^\s*' + label + r'\s+(.+?)\s*$', t, re.M)
+            if m:
+                return re.sub(r'\s+', ' ', m.group(1).replace('[', '').replace(']', '')).strip()
+        return None
+    ip = re.search(r'^\s*IP\s+([0-9a-fA-F:.]+)(?:\s|$)', t, re.M)
+    sc = re.search(r'CleanIP\s*评分.*?(\d+)\s*/\s*100(?:\s*\((\S+?)\))?', t)
+    if not (ip and sc):
+        return None
+    kind, native = field('IP 类型', 'IP类型', '类型'), field('原生 / 广播')
+    # Newer cards put both tags on the type line: "住宅 IP 原生 IP".
+    if kind and not native:
+        tag = re.search(r'(原生|广播) ?IP', kind)
+        if tag:
+            native, kind = tag.group(0), (kind[:tag.start()] + kind[tag.end():]).strip() or None
+    return {'ip': ip.group(1), 'score': int(sc.group(1)), 'grade': sc.group(2), 'type': kind, 'native': native,
+            'network': field('网络类型', '网络'), 'location': field('归属地')}
+
+
+def verdict(exit_, risk, minimum, generic=None, generic_error=''):
+    """The pure decision: (ok, why, details). exit_ is claude_exit(), risk is iprisk(), generic the probe IP."""
+    ip = exit_['ip']
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False, 'claude.ai 返回的出口不是有效 IP', {}
+    if addr.version != 4:
+        return False, 'Claude 出口是 IPv6（%s），守护只支持 IPv4，请在代理中关闭 IPv6' % ip, {}
+    if not addr.is_global:
+        return False, 'Claude 出口不是公网 IP（%s）' % ip, {}
+    d = {'trust': risk.get('trust_score') if isinstance(risk, dict) else None}
+    if not isinstance(risk, dict):
+        return False, 'ip.net.coffee 查询失败', d
+    code = (risk.get('countryCode') or exit_.get('loc') or '').upper()
+    d.update(country=risk.get('country'), region=risk.get('region'), city=risk.get('city'), code=code,
+             org=risk.get('asOrganization'),
+             residential=risk.get('isResidential') is True or risk.get('asn_kind') == 'residential',
+             flags=[name for key, name in FLAGS if risk.get(key)])
+    try:
+        same = addr in ipaddress.ip_network(risk.get('cidr') or (risk.get('ip') or '') + '/32', strict=False)
+    except ValueError:
+        same = False
+    region = net.RESTRICTED.get(code) or net.RESTRICTED.get((exit_.get('loc') or '').upper())
+    trust = d['trust']
+    if not same:
+        return False, 'ip.net.coffee 返回的是另一个 IP 的结果', d
+    if region:
+        return False, 'Claude 出口位于%s（Claude 不提供服务的地区）' % region, d
+    if d['flags']:
+        return False, '被标记为' + '、'.join(d['flags']), d
+    if not d['residential']:
+        return False, '不是住宅 IP', d
+    if not isinstance(trust, (int, float)) or isinstance(trust, bool):
+        return False, 'ip.net.coffee 没有该 IP 的可信度评分', d
+    if trust < minimum:
+        return False, '可信度 %s，需要不低于 %s' % (trust, minimum), d
+    if generic is None:
+        return False, '无法确认通用出口与 Claude 出口一致：' + (generic_error or '查询失败'), d
+    if generic != ip:
+        return False, '分流：Claude 出口 %s 与通用出口 %s 不一致' % (ip, generic), d
+    return True, None, d
+
+
+def report():
+    minimum = min_trust()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        # CleanIP is reference only: at most two attempts, in parallel with the real check.
+        ref_job = pool.submit(retry, lambda: net.fetch('https://cleanip.io/cli', timeout=6), 2)
+        exit_, exit_error = retry(claude_exit)
+        risk, risk_error = retry(lambda: iprisk(exit_['ip'])) if exit_ else (None, '')
+        generic, generic_error = None, ''
+        if exit_:
+            try:
+                generic = net.probe()[0]
+            except ValueError as exc:  # ExitChanged (split) or ProbeUnavailable
+                generic_error = str(exc)
+                m = re.search(r'与通用出口 (\S+?) 不一致', generic_error)
+                generic = m.group(1) if m else None
+        ref_text, ref_error = ref_job.result()
+    cleanip = cleanip_reference(ref_text) if ref_text else None
+    out = {'ok': False, 'why': None, 'source': 'ip.net.coffee', 'min_trust': minimum,
+           'ip': exit_ and exit_['ip'], 'loc': exit_ and exit_['loc'],
+           'cleanip': cleanip, 'cleanip_error': None if cleanip else (ref_error or 'CleanIP 输出格式无法解析')}
+    if not exit_:
+        out['why'] = '无法取得 Claude 出口 IP：' + exit_error
+        return out
+    if risk is None:
+        out['why'] = 'ip.net.coffee 查询失败：' + risk_error
+        return out
+    ok, why, d = verdict(exit_, risk, minimum, generic, generic_error)
+    location = ' · '.join(x for x in (d.get('country'), d.get('region'), d.get('city')) if x)
+    out.update(ok=ok, why=why, trust=d.get('trust'), residential=d.get('residential'), flags=d.get('flags'),
+               org=d.get('org'), country_code=d.get('code'), generic_ip=generic,
+               type='住宅 IP' if d.get('residential') else '非住宅 IP',
+               # CleanIP's Chinese place name reads better when it describes the same IP.
+               location=(cleanip or {}).get('location') if (cleanip or {}).get('ip') == exit_['ip'] and cleanip.get('location') else location or None)
+    # CleanIP reference at the top level too, for the status line and older readers.
+    if cleanip:
+        out.update(score=cleanip['score'], grade=cleanip['grade'], native=cleanip['native'], network=cleanip['network'])
+    return out
+
+
+def main():
+    r = report()
+    if sys.argv[1:] == ['--json']:
+        print(json.dumps(r, ensure_ascii=False))
+    elif r['ok']:
+        print('OK %s trust %s' % (r['ip'], r.get('trust')))
     else:
-        tr=rk.get("trust_score"); d["trust"]=tr
-        bad=[k for k in ("is_datacenter","is_vpn","is_proxy","is_tor","is_abuser") if rk.get(k)]
-        # The service caches per /24 and may echo another address of the same block, so match on its cidr.
-        try: same=ipaddress.ip_address(d["ip"]) in ipaddress.ip_network(rk.get("cidr") or (rk.get("ip") or "")+"/32",strict=False)
-        except ValueError: same=False
-        if not same: d["why"]="net.coffee: answered for a different IP"
-        elif bad: d["why"]="net.coffee: flagged "+",".join(bad)
-        elif not (rk.get("isResidential") is True or rk.get("asn_kind")=="residential"): d["why"]="net.coffee: not residential"
-        elif not isinstance(tr,(int,float)) or isinstance(tr,bool) or tr<int(os.environ["MINT"]): d["why"]="net.coffee: trust %s < %s"%(tr,os.environ["MINT"])
-        if d["why"]: d["ok"]=False
-if os.environ.get("MODE")=="--json": print(json.dumps(d,ensure_ascii=False))
-elif d["ok"]: print("OK %s %d"%(d["ip"],d["score"]))
-else: print("%s (%s)"%(d["why"],d["ip"]) if d["ip"] else d["why"])
-sys.exit(0 if d["ok"] else 1)'
+        print('%s (%s)' % (r['why'], r['ip']) if r.get('ip') else r['why'])
+    return 0 if r['ok'] else 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())

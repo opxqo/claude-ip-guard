@@ -1,6 +1,6 @@
 # Claude IP Guard
 
-一个常驻的网络维稳控制台：启动前用 [CleanIP](https://cleanip.io) 和 [ip.net.coffee](https://ip.net.coffee/claude/) 双重检查出口 IP 是否为高分住宅 IP（两家都通过才放行）；检测不通过也可以确认一次后强制启动；之后可以选择打开 Claude 桌面端、在终端打开 CLI，或者只挂着监控。运行期间持续监控出口 IPv4，一旦变化就关闭全部 Claude，也可以用 ⌃⌥⌘K 一键关闭。仅支持 macOS（Apple Silicon，macOS 14+）。
+一个常驻的网络维稳控制台：启动前按 [ip.net.coffee/claude](https://ip.net.coffee/claude/) 的方法检测 Claude 实际看到的出口 IP（可信度、住宅、风险标记、地区、是否分流），[CleanIP](https://cleanip.io) 的分数只作参考；检测不通过也可以确认一次后强制启动；之后可以选择打开 Claude 桌面端、在终端打开 CLI，或者只挂着监控。运行期间持续监控出口 IPv4，一旦变化就关闭全部 Claude，也可以用 ⌃⌥⌘K 一键关闭。仅支持 macOS（Apple Silicon，macOS 14+）。
 
 > 非官方项目，与 Anthropic 和 CleanIP 均无关联。
 
@@ -10,10 +10,10 @@
 
 | 目录 | 内容 |
 |---|---|
-| `bin/` | `claude-ip-check`（CleanIP 评分与住宅判定）、`claude-ip-watch`（出口监控，暂停重试后才关闭）、`claude-ip-override`（强制放行授权与就绪检查）、`claude_network.py`（共用的网络查询）、`claude-guard`（终端入口）、`claude-desktop-guard` |
+| `bin/` | `claude-ip-check`（启动检测：Claude 出口 + ip.net.coffee 风险，CleanIP 参考）、`claude-ip-watch`（出口监控，暂停重试后才关闭）、`claude-ip-override`（强制放行授权与就绪检查）、`claude_network.py`（共用的网络查询）、`claude-guard`（终端入口）、`claude-desktop-guard` |
 | `launcher/` | 控制台 `Claude (IP Guard).app` 的 Swift 源码（`Sources/`）与构建脚本，以及 Python 测试 |
 | `mod/cleanip/` | Claude Code mod：会话开始、提交提示和每个模型步骤前都会校验 |
-| `config/` | `ip-guard.conf.example`：评分门槛 `MIN_SCORE`、`MIN_TRUST`，波动策略 `ON_UNSTABLE` |
+| `config/` | `ip-guard.conf.example`：可信度门槛 `MIN_TRUST`，波动策略 `ON_UNSTABLE` |
 | `docs/` | 设计说明与限制 |
 
 ## 安装
@@ -31,16 +31,16 @@
 `~/.claude/ip-guard.conf`：
 
 ```
-MIN_SCORE=95
-```
-
-CleanIP 评分必须**高于**该值才放行，范围 0–99，无效值回退为 95。
-
-```
 MIN_TRUST=80
 ```
 
-ip.net.coffee 返回的 `trust_score`（0–100）必须**不低于**该值，且没有机房、VPN、代理、Tor、滥用标记，才算通过；无效值回退为 80。
+启动检测和 [ip.net.coffee/claude](https://ip.net.coffee/claude/) 网页是同一套方法，全部满足才放行：
+
+1. 从 `https://claude.ai/cdn-cgi/trace` 取得 Claude 实际看到的出口 IP（必须是公网 IPv4）。
+2. 用 ip.net.coffee 的 `/api/iprisk/<IP>` 查它：`trust_score`（0–100）**不低于** `MIN_TRUST`（无效值回退为 80），是住宅 IP，没有机房、VPN、代理、Tor、滥用标记，并且不在 Claude 不提供服务的地区（中国大陆、香港、澳门、俄罗斯、朝鲜、伊朗、叙利亚、古巴、白俄罗斯、委内瑞拉）。
+3. 通用出口（ipify 等）和 `api.anthropic.com` 看到的 IP 必须与它一致，不一致就是分流。
+
+CleanIP 会同时查询，分数显示在控制台里作参考；它查不到或分数低都不影响放行。`MIN_SCORE` 已不再使用。
 
 ```
 ON_UNSTABLE=pause
@@ -52,7 +52,7 @@ ON_UNSTABLE=pause
 
 打开 `Claude (IP Guard).app`：
 
-1. **检测**：CleanIP 评分与住宅判定、ip.net.coffee 风险核验。
+1. **检测**：取得 Claude 出口 IP，ip.net.coffee 风险核验，分流检查。
 2. **建立监控**：通过就点「建立监控」；没通过可以点「仍然强制启动」，确认一次。强制授权在这次控制台运行期间，对之后启动的桌面端和 CLI 都有效。
 3. **选择客户端**：桌面端、CLI（Terminal 或 Warp，在设置里选，可指定启动目录），或者只监控。只监控时，即使没有任何 Claude 在运行，监控器也会一直保持。
 
@@ -61,7 +61,7 @@ ON_UNSTABLE=pause
 | 卡片 | 内容 |
 |---|---|
 | 状态 | 🟢 网络稳定 · 🟠 网络波动（已暂停 n 个进程） · 🔴 已断开 / 失联 · ⚪ 未守护；已守护时长和当前波动策略 |
-| 出口 IP | 基准 IP、CleanIP 分数环、住宅 / 原生 / 可信度标签；强制启动时显示「强制」 |
+| Claude 出口 IP | 基准 IP、ip.net.coffee 可信度环、住宅 / 原生 / 风险标签、运营商，CleanIP 分数（灰色，仅参考）；强制启动时显示「强制」 |
 | 出口探测 | 最近 5 分钟每次探测的耗时，失败标红 |
 | Claude 客户端 | 桌面端和 CLI 的会话数、启动按钮。如果 `~/.claude/settings.json` 把 CLI 指向本地代理（例如 CC Switch）而端口没在监听，会在这里提示 |
 | 近 24 小时 | 暂停、关闭次数和最近的事件 |
@@ -90,8 +90,8 @@ mod 的测试用 `claude plugin test mod/cleanip`。
 
 ## 注意
 
-- ip.net.coffee 用的是它网页内部的接口 `/api/iprisk/<IP>`，没有公开文档，字段随时可能变；它按 /24 缓存，返回的 `ip` 可能是同网段的另一个地址，所以按 `cidr` 匹配。任一家查询失败（重试 3 次后）都按失败处理。
-- 依赖 `https://cleanip.io/cli` 的纯文本输出格式。官方改字段名时，`bin/claude-ip-check` 和 `mod/cleanip/hooks/register.tsx` 里各有一份解析规则，需要同时更新。
-- 强制放行只跳过 CleanIP 的评分与住宅判定，仍要求出口探测成功且监控健康，需要确认一次。
+- ip.net.coffee 用的是它网页内部的接口 `/api/iprisk/<IP>`，没有公开文档，字段随时可能变；它按 /24 缓存，返回的 `ip` 可能是同网段的另一个地址，所以按 `cidr` 匹配。Claude 出口或 ip.net.coffee 查询失败（各重试 3 次后）都按失败处理。
+- CleanIP 只作参考：`bin/claude-ip-check` 解析它的纯文本输出，格式变了只会让参考分数显示不出来，不会影响放行。
+- 强制放行只跳过上面的检测判定，仍要求出口探测成功（包括 Claude 出口一致）且监控健康，需要确认一次。
 - 从控制台打开的 CLI 直接运行 `~/.local/bin/claude`，不再经过 `claude-guard`；mod 会读取控制台会话，不重复检测。
 - 源码里的 `__HOME__` 由 `install.sh` 替换为你的用户目录。

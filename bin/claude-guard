@@ -1,10 +1,12 @@
 #!/bin/zsh
 # Gate: runs BEFORE Claude Code starts, then hands off to the IP watcher.
+# The verdict is ip.net.coffee's (Claude's own exit IP); CleanIP is shown for reference.
 G=$'\e[32m'; R=$'\e[31m'; D=$'\e[2m'; X=$'\e[0m'
-print -n "${D}… CleanIP 检测出口 IP${X}"
+print -n "${D}… 检测 Claude 出口 IP（ip.net.coffee）${X}"
 j=$(~/.claude/bin/claude-ip-check --json); ok=$?
-read -r ip score grade type <<< "$(print -r -- "$j" | /usr/bin/python3 -c 'import sys,json
-d=json.loads(sys.stdin.read() or "{}"); print(d.get("ip") or "-", d.get("score") or "-", d.get("grade") or "-", (d.get("type") or "-").replace(" ",""))' 2>/dev/null)"
+read -r ip trust type ref <<< "$(print -r -- "$j" | /usr/bin/python3 -c 'import sys,json
+d=json.loads(sys.stdin.read() or "{}"); c=d.get("cleanip") or {}
+print(d.get("ip") or "-", d.get("trust") if d.get("trust") is not None else "-", (d.get("type") or "-").replace(" ",""), ("CleanIP%s" % c["score"]) if c.get("score") is not None else "CleanIP-")' 2>/dev/null)"
 if (( ok != 0 )); then
   why=$(print -r -- "$j" | /usr/bin/python3 -c 'import sys,json; print(json.loads(sys.stdin.read() or "{}").get("why") or "lookup failed")' 2>/dev/null)
   print "\r${R}✗ 拒绝启动 · ${why} · ${ip}${X}          " >&2; exit 1
@@ -13,5 +15,5 @@ if ! ~/.claude/bin/claude-ip-override --ensure "$ip" >/dev/null; then
   print "监控未就绪，拒绝启动 Claude Code" >&2
   exit 1
 fi
-print "\r${G}✓ CleanIP ${score} ${grade} · ${type} · ${ip} · 已启动 IP 监听${X}          "
+print "\r${G}✓ 可信 ${trust} · ${type} · ${ip} · 已启动 IP 监听${X} ${D}(${ref} 仅参考)${X}          "
 exec claude "$@"

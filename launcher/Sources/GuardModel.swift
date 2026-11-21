@@ -41,7 +41,6 @@ final class GuardModel: ObservableObject {
 
     // Settings and transient UI
     @Published var onUnstable = Conf.onUnstable
-    @Published var minScore = Conf.minScore
     @Published var minTrust = Conf.minTrust
     @Published var killArmed: Date?
     @Published var notice: String?
@@ -49,7 +48,7 @@ final class GuardModel: ObservableObject {
     @AppStorage("terminal") var terminal = Clients.Terminal.terminal.rawValue
     @AppStorage("cliDirectory") var cliDirectory = FileManager.default.homeDirectoryForCurrentUser.path
 
-    var titles: [String] { ["查询出口 IP · CleanIP", "纯净度高于 \(minScore) 且为住宅 IP", "风险核验 · ip.net.coffee", "建立 IP 监控"] }
+    var titles: [String] { ["Claude 出口 IP · claude.ai", "风险核验 · ip.net.coffee 可信度 ≥ \(minTrust)", "分流检查 · 通用出口与 Claude 一致", "建立 IP 监控"] }
     var live = false  // false in snapshots: no timers, no helpers
     private var lastBeat: Double?
     private var logStampSeen: Date?
@@ -62,7 +61,7 @@ final class GuardModel: ObservableObject {
         phase = .checking
         steps = Array(repeating: .waiting, count: 4)
         report = nil; failure = nil; rawReport = nil; endReason = nil
-        minScore = Conf.minScore; minTrust = Conf.minTrust
+        minTrust = Conf.minTrust
         steps[0] = .running
         background {
             let o = run(checkTool, ["--json"])
@@ -73,18 +72,18 @@ final class GuardModel: ObservableObject {
 
     private func afterCheck(_ r: Report?, raw: String) {
         guard let r else { return fail(0, "检测程序未返回有效结果") }
-        guard r.ip != nil || r.ok else { return fail(0, "CleanIP 查询失败：\(r.why ?? "未取得响应")") }
+        guard r.ip != nil else { return fail(0, r.why ?? "无法取得 Claude 出口 IP") }
         report = r; rawReport = raw; checkedAt = Date()
-        if let m = r.min { minScore = m }
+        if let m = r.min_trust { minTrust = m }
+        let failed = r.ok ? 99 : r.failedStep
         steps[0] = .done
         steps[1] = .running
         after(0.3) {
-            let cleanip = (r.score ?? 0) > (r.min ?? self.minScore) && (r.type?.contains("住宅") ?? false)
-            guard r.ip != nil, cleanip else { return self.fail(1, reason(r, min: self.minScore)) }
+            guard failed > 1 else { return self.fail(1, r.why ?? "检测未通过") }
             self.steps[1] = .done
             self.steps[2] = .running
             after(0.3) {
-                guard r.ok else { return self.fail(2, reason(r, min: self.minScore)) }
+                guard failed > 2 else { return self.fail(2, r.why ?? "检测未通过") }
                 self.steps[2] = .done
                 self.phase = .decided
             }
@@ -198,9 +197,8 @@ final class GuardModel: ObservableObject {
         Conf.set("ON_UNSTABLE", p)
     }
 
-    func setThresholds(score: Int, trust: Int) {
-        minScore = score; minTrust = trust
-        Conf.set("MIN_SCORE", String(score))
+    func setMinTrust(_ trust: Int) {
+        minTrust = trust
         Conf.set("MIN_TRUST", String(trust))
     }
 

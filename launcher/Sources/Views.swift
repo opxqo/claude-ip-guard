@@ -156,20 +156,22 @@ struct IPCard: View {
     var body: some View {
         let r = m.report
         let ip = m.sessionIP ?? m.health?.ip ?? r?.ip
-        let ringColor: Color = (r?.ok ?? false) ? Palette.ok : (r == nil ? Palette.idle : Palette.bad)
+        let ringColor: Color = (r?.ok ?? false) ? Palette.ok : (r?.trust == nil ? Palette.idle : Palette.bad)
         VStack(alignment: .leading, spacing: 8) {
-            CardTitle(text: "出口 IP", symbol: "globe.americas.fill", trailing: r?.location.map { String($0.prefix(18)) })
+            CardTitle(text: "Claude 出口 IP", symbol: "globe.americas.fill", trailing: r?.location.map { String($0.prefix(18)) })
             HStack(alignment: .center) {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(ip ?? "—").font(.system(size: 22, weight: .bold, design: .monospaced)).lineLimit(1).minimumScaleFactor(0.7)
                     HStack(spacing: 4) {
-                        if let t = r?.type { Pill(text: t, color: t.contains("住宅") ? Palette.ok : Palette.bad) }
+                        if let t = r?.type { Pill(text: t, color: t.contains("非") ? Palette.bad : Palette.ok) }
                         if let n = r?.native { Pill(text: n, color: Palette.accent) }
-                        if let t = r?.trust { Pill(text: "可信 \(Int(t))", color: Int(t) >= m.minTrust ? Palette.ok : Palette.bad) }
+                        ForEach(r?.flags ?? [], id: \.self) { f in Pill(text: f, color: Palette.bad) }
+                        if let s = r?.score { Pill(text: "CleanIP \(s)\(r?.grade.map { " " + $0 } ?? "") · 参考", color: Palette.idle) }
                     }
+                    if let org = r?.org { Text(org).font(.system(size: 10.5)).foregroundStyle(.secondary).lineLimit(1) }
                 }
                 Spacer(minLength: 8)
-                ScoreRing(score: r?.score, grade: r?.grade, color: ringColor)
+                ScoreRing(score: r?.trust.map { Int($0) }, grade: r?.trust.map(trustLabel) ?? "可信度", color: ringColor)
             }
         }
         .card()
@@ -497,7 +499,7 @@ struct LaunchFlow: View {
                 if let icon = appIcon() { Image(nsImage: icon).resizable().frame(width: 46, height: 46) }
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Claude IP Guard").font(.system(size: 18, weight: .bold))
-                    Text("网络维稳控制台 · 出口检测由 cleanip.io 与 ip.net.coffee 提供")
+                    Text("网络维稳控制台 · 以 ip.net.coffee 为准，CleanIP 仅参考")
                         .font(.system(size: 11)).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -576,7 +578,6 @@ struct ConsoleRoot: View {
 struct SettingsView: View {
     @ObservedObject var m: GuardModel
     var close: () -> Void
-    @State private var score = Conf.minScore
     @State private var trust = Conf.minTrust
     @State private var login = LoginItem.enabled
 
@@ -604,8 +605,8 @@ struct SettingsView: View {
             }.card()
             VStack(alignment: .leading, spacing: 10) {
                 CardTitle(text: "检测门槛（下次检测生效）", symbol: "slider.horizontal.3")
-                Stepper("CleanIP 纯净度需高于 \(score)", value: $score, in: 0...99)
                 Stepper("ip.net.coffee 可信度不低于 \(trust)", value: $trust, in: 0...100)
+                Text("CleanIP 分数只作参考，不影响放行。").font(.system(size: 11)).foregroundStyle(.secondary)
             }.card()
             VStack(alignment: .leading, spacing: 10) {
                 CardTitle(text: "守护", symbol: "shield.lefthalf.filled")
@@ -615,7 +616,7 @@ struct SettingsView: View {
             }.card()
             HStack {
                 Spacer()
-                Button("完成") { m.setThresholds(score: score, trust: trust); close() }
+                Button("完成") { m.setMinTrust(trust); close() }
                     .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
             }
         }

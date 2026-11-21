@@ -44,27 +44,38 @@ func background(_ work: @escaping () -> Void) { DispatchQueue.global(qos: .userI
 func main(_ work: @escaping () -> Void) { DispatchQueue.main.async(execute: work) }
 func after(_ s: Double, _ f: @escaping () -> Void) { DispatchQueue.main.asyncAfter(deadline: .now() + s, execute: f) }
 
-// MARK: - CleanIP + ip.net.coffee report (claude-ip-check --json)
+// MARK: - Launch check report (claude-ip-check --json)
 
+/// ip.net.coffee decides (Claude's own exit IP, its trust score and flags); CleanIP is reference only.
 struct Report: Codable, Equatable {
-    var min: Int?
-    var ok: Bool
-    var why: String?
-    var ip: String?
-    var score: Int?
-    var grade: String?
-    var type: String?
-    var native: String?
-    var network: String?
-    var location: String?
-    var trust: Double?
+    var ok = false
+    var why: String? = nil
+    var ip: String? = nil            // the exit claude.ai sees
+    var trust: Double? = nil         // ip.net.coffee trust_score
+    var min_trust: Int? = nil
+    var residential: Bool? = nil
+    var flags: [String]? = nil
+    var type: String? = nil
+    var location: String? = nil
+    var org: String? = nil
+    var generic_ip: String? = nil
+    var score: Int? = nil            // CleanIP, reference
+    var grade: String? = nil
+    var native: String? = nil
+    var network: String? = nil
+    var cleanip_error: String? = nil
+
+    /// Where the verdict failed: 0 Claude exit, 1 ip.net.coffee risk, 2 split routing.
+    var failedStep: Int {
+        if ip == nil { return 0 }
+        let w = why ?? ""
+        return w.contains("分流") || w.contains("通用出口") ? 2 : 1
+    }
 }
 
-/// Human reason for a failed verdict, CleanIP's own rule first.
-func reason(_ r: Report, min: Int) -> String {
-    if let s = r.score, s <= (r.min ?? min) { return "纯净度 \(s) 分，需要高于 \(r.min ?? min) 分" }
-    if let t = r.type, !t.contains("住宅") { return "不是住宅 IP（\(t)）" }
-    return r.why ?? "检测未通过"
+/// ip.net.coffee's own wording for a trust score.
+func trustLabel(_ t: Double) -> String {
+    t >= 95 ? "极度纯净" : t >= 80 ? "纯净" : t >= 50 ? "良好" : t >= 25 ? "中性" : "可疑"
 }
 
 // MARK: - ip-guard.conf
@@ -96,7 +107,6 @@ enum Conf {
         guard let v = confValue(text, key).flatMap(Int.init), range.contains(v) else { return fallback }
         return v
     }
-    static var minScore: Int { int("MIN_SCORE", 0...99, 95) }
     static var minTrust: Int { int("MIN_TRUST", 0...100, 80) }
     static var onUnstable: String { confValue(text, "ON_UNSTABLE") == "kill" ? "kill" : "pause" }
     static func set(_ key: String, _ value: String) {

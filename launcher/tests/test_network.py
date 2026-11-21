@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 BIN = Path(__file__).resolve().parents[2] / 'bin'
 sys.path.insert(0, str(BIN))
@@ -24,6 +24,7 @@ def module(name, path):
 
 watch = module('watch', BIN / 'claude-ip-watch')
 override = module('override', BIN / 'claude-ip-override')
+check = module('check', BIN / 'claude-ip-check')
 
 
 class NetworkTests(unittest.TestCase):
@@ -43,54 +44,72 @@ class NetworkTests(unittest.TestCase):
             with self.assertRaises(net.QueryError): net.fetch('https://cleanip.io/cli')
             self.assertEqual(query.call_count, 2)
 
-    def test_transport_failure_survives_in_checker_json(self):
-        script = (BIN / 'claude-ip-check').read_text()
-        parser = script.split("/usr/bin/python3 -c '", 1)[1].rsplit("'", 1)[0]
-        error = 'HTTPS/TLS 握手失败（curl 35）'
-        result = subprocess.run(['/usr/bin/python3', '-c', parser], input='', text=True, capture_output=True,
-                                env={**os.environ, 'MIN': '70', 'MODE': '--json', 'LOOKUP_ERROR': error}, timeout=5)
-        self.assertEqual(json.loads(result.stdout)['why'], error)
-        self.assertEqual(result.returncode, 1)
+    GOOD = {'ip': '8.8.8.8', 'cidr': '8.8.8.0/24', 'is_datacenter': False, 'isResidential': True, 'is_vpn': False,
+            'is_proxy': False, 'is_tor': False, 'is_abuser': False, 'trust_score': 100, 'countryCode': 'us'}
 
-    def test_shared_checker_keeps_score_and_residential_policy(self):
-        script = (BIN / 'claude-ip-check').read_text()
-        parser = script.split("/usr/bin/python3 -c '", 1)[1].rsplit("'", 1)[0]
-        for kind, network, score, expected in [('住宅 IP', 'ISP', 98, True), ('未知类型', '住宅 IP', 98, True), ('机房 IP', 'ISP', 98, False), ('住宅 IP', 'ISP', 70, False)]:
-            raw = f'IP 8.8.8.8\nIP 类型 {kind}\n网络类型 {network}\nCleanIP 评分 {score}/100 (A+)\n'
-            result = subprocess.run(['/usr/bin/python3', '-c', parser], input=raw, text=True, capture_output=True, env={**os.environ, 'MIN': '70', 'MODE': '--json'}, timeout=5)
-            self.assertIs(json.loads(result.stdout)['ok'], expected)
-            self.assertEqual(result.returncode, 0 if expected else 1)
-
-    def check(self, risk, error='', trust='80', ip='8.8.8.8'):
-        script = (BIN / 'claude-ip-check').read_text()
-        parser = script.split("/usr/bin/python3 -c '", 1)[1].rsplit("'", 1)[0]
-        raw = f'IP {ip}\nIP 类型 住宅 IP\n网络类型 ISP\nCleanIP 评分 98/100 (A+)\n'
-        env = {**os.environ, 'MIN': '70', 'MINT': trust, 'MODE': '--json', 'COFFEE': '1', 'RISK': risk, 'RISK_ERROR': error}
-        result = subprocess.run(['/usr/bin/python3', '-c', parser], input=raw, text=True, capture_output=True, env=env, timeout=5)
-        return json.loads(result.stdout), result.returncode
-
-    def test_second_provider_must_agree(self):
-        good = {'ip': '8.8.8.8', 'is_datacenter': False, 'isResidential': True, 'is_vpn': False, 'is_proxy': False, 'is_tor': False, 'is_abuser': False, 'trust_score': 100}
-        d, code = self.check(json.dumps(good))
-        self.assertTrue(d['ok']); self.assertEqual((code, d['trust']), (0, 100))
-        for change, text in [({'is_datacenter': True}, 'is_datacenter'), ({'is_vpn': True}, 'is_vpn'), ({'is_abuser': True}, 'is_abuser'),
-                             ({'isResidential': False}, 'not residential'), ({'trust_score': 79}, 'trust 79 < 80'),
-                             ({'trust_score': None}, 'trust None'), ({'ip': '1.1.1.1', 'cidr': '1.1.1.0/24'}, 'different IP'), ({'ip': '1.1.1.1', 'cidr': None}, 'different IP')]:
+    def test_coffee_verdict_is_the_gate(self):
+        exit_ = {'ip': '8.8.8.8', 'loc': 'US'}
+        ok, why, d = check.verdict(exit_, self.GOOD, 80, '8.8.8.8')
+        self.assertTrue(ok); self.assertIsNone(why); self.assertEqual(d['trust'], 100)
+        for change, text in [({'is_datacenter': True}, '机房'), ({'is_vpn': True}, 'VPN'), ({'is_abuser': True}, '滥用'),
+                             ({'isResidential': False}, '不是住宅'), ({'trust_score': 79}, '可信度 79'),
+                             ({'trust_score': None}, '没有该 IP 的可信度'), ({'cidr': '1.1.1.0/24'}, '另一个 IP'),
+                             ({'cidr': None, 'ip': '1.1.1.1'}, '另一个 IP'), ({'countryCode': 'hk'}, '香港')]:
             with self.subTest(change=change):
-                d, code = self.check(json.dumps({**good, **change}))
-                self.assertFalse(d['ok']); self.assertEqual(code, 1); self.assertIn(text, d['why']); self.assertIn('net.coffee', d['why'])
-        d, _ = self.check(json.dumps({**good, 'ip': '8.8.8.113', 'cidr': '8.8.8.0/24'}))
-        self.assertTrue(d['ok'])
-        d, _ = self.check(json.dumps({**good, 'isResidential': None, 'asn_kind': 'residential'}))
-        self.assertTrue(d['ok'])
-        d, _ = self.check(json.dumps({**good, 'trust_score': 79}), trust='70')
-        self.assertTrue(d['ok'])
+                ok, why, _ = check.verdict(exit_, {**self.GOOD, **change}, 80, '8.8.8.8')
+                self.assertFalse(ok); self.assertIn(text, why)
+        self.assertTrue(check.verdict(exit_, {**self.GOOD, 'isResidential': None, 'asn_kind': 'residential'}, 80, '8.8.8.8')[0])
+        self.assertTrue(check.verdict(exit_, {**self.GOOD, 'trust_score': 79}, 70, '8.8.8.8')[0])
+        self.assertIn('中国大陆', check.verdict({'ip': '8.8.8.8', 'loc': 'CN'}, {**self.GOOD, 'countryCode': ''}, 80, '8.8.8.8')[1])
 
-    def test_second_provider_failure_fails_closed(self):
-        for risk, error in [('', 'HTTPS 查询超时（curl 28）'), ('<html>Error 400</html>', ''), ('[]', '')]:
-            with self.subTest(risk=risk):
-                d, code = self.check(risk, error)
-                self.assertFalse(d['ok']); self.assertEqual(code, 1); self.assertTrue(d['why'].startswith('net.coffee: '))
+    def test_split_routing_and_unconfirmed_generic_exit_fail(self):
+        exit_ = {'ip': '8.8.8.8', 'loc': 'US'}
+        ok, why, _ = check.verdict(exit_, self.GOOD, 80, '9.9.9.9')
+        self.assertFalse(ok); self.assertIn('分流', why)
+        ok, why, _ = check.verdict(exit_, self.GOOD, 80, None, '超时')
+        self.assertFalse(ok); self.assertIn('超时', why)
+        self.assertIn('IPv6', check.verdict({'ip': '2001:db8::1', 'loc': 'US'}, self.GOOD, 80, None)[1])
+
+    def run_report(self, exit_=('8.8.8.8', 'US'), risk=None, generic='8.8.8.8', cleanip='IP 8.8.8.8\nIP 类型 住宅 IP 原生 IP\nCleanIP 评分 45/100 (D)\n'):
+        risk = self.GOOD if risk is None else risk
+        def fetch(url, timeout=5, context=None):
+            if 'claude.ai' in url:
+                if exit_ is None: raise net.QueryError(28, 'HTTPS 查询超时（curl 28）')
+                return 'fl=1\nip=%s\nloc=%s\n' % exit_
+            if 'iprisk' in url:
+                if isinstance(risk, Exception): raise risk
+                return json.dumps(risk)
+            if 'cleanip' in url:
+                if cleanip is None: raise net.QueryError(35, 'TLS')
+                return cleanip
+            raise AssertionError(url)
+        probe = (lambda: (generic, 'proxy')) if not isinstance(generic, Exception) else Mock(side_effect=generic)
+        with patch.object(net, 'fetch', side_effect=fetch), patch.object(net, 'probe', side_effect=probe), \
+             patch.object(check.time, 'sleep'), patch.object(check, 'min_trust', return_value=80):
+            return check.report()
+
+    def test_cleanip_is_reference_only(self):
+        r = self.run_report()
+        self.assertTrue(r['ok']); self.assertEqual((r['score'], r['grade'], r['native']), (45, 'D', '原生 IP'))
+        self.assertEqual(r['cleanip']['type'], '住宅 IP')
+        r = self.run_report(cleanip=None)
+        self.assertTrue(r['ok']); self.assertIsNone(r['cleanip']); self.assertIn('TLS', r['cleanip_error'])
+
+    def test_report_fails_closed_on_lookup_failures(self):
+        r = self.run_report(exit_=None)
+        self.assertFalse(r['ok']); self.assertIn('无法取得 Claude 出口 IP', r['why'])
+        r = self.run_report(risk=net.QueryError(28, 'HTTPS 查询超时（curl 28）'))
+        self.assertFalse(r['ok']); self.assertIn('ip.net.coffee 查询失败', r['why'])
+        r = self.run_report(generic=net.ExitChanged('Claude 出口 8.8.8.8 与通用出口 9.9.9.9 不一致（分流）'))
+        self.assertFalse(r['ok']); self.assertIn('分流', r['why']); self.assertEqual(r['generic_ip'], '9.9.9.9')
+
+    def test_monitor_requires_claude_exit_to_match(self):
+        t = 'fl=1\nip=8.8.8.8\nloc=US\n'
+        self.assertEqual(net.classify_claude(['8.8.8.8', '', '8.8.8.8'], [t, '']), '8.8.8.8')
+        with self.assertRaises(net.ExitChanged): net.classify_claude(['8.8.8.8'], ['ip=9.9.9.9\n', t])
+        with self.assertRaises(net.ProbeUnavailable): net.classify_claude(['8.8.8.8'], ['', '<html>'])
+        with self.assertRaises(net.ExitChanged): net.classify_claude(['8.8.8.8'], [t], '1.1.1.1')
+        self.assertEqual(net.CLAUDE_URLS, ('https://api.anthropic.com/cdn-cgi/trace', 'https://claude.ai/cdn-cgi/trace'))
 
     def test_public_ip_validation_and_fallback(self):
         self.assertEqual(net.classify(['8.8.8.8\n', '8.8.8.8']), '8.8.8.8')
@@ -146,11 +165,6 @@ class NetworkTests(unittest.TestCase):
         self.assertEqual(len(net.URLS), 3)
         self.assertEqual(net.classify(['', '8.8.8.8\n', 'timeout'], '8.8.8.8'), '8.8.8.8')
         with self.assertRaises(net.ExitChanged): net.classify(['8.8.8.8', '8.8.8.8', '1.1.1.1'])
-
-    def test_checker_retries_only_failed_lookups(self):
-        script = (BIN / 'claude-ip-check').read_text()
-        self.assertIn('for attempt in 1 2 3', script)
-        self.assertIn('(( lookup_status == 0 )) && break', script)
 
     def test_stale_force_grants_are_pruned_and_live_ones_kept(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(override, 'ROOT', Path(tmp)):

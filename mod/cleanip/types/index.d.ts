@@ -3,7 +3,8 @@ export type Report = {
   ok: boolean
   why?: string
   ip?: string
-  score?: number
+  trust?: number   // ip.net.coffee trust_score: the gate
+  score?: number   // CleanIP score: reference only
   grade?: string
   type?: string
   ip_type?: string

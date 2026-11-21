@@ -208,6 +208,12 @@ func selftest() -> Int32 {
     check(routeFor("http://localhost:15721", listening: { h, p in h == "127.0.0.1" && p == 15721 }).kind == .localUp, "local proxy up")
     check(routeFor("https://example.com/v1", listening: { _, _ in true }).kind == .custom, "custom endpoint")
     check(baseURL(fromSettings: Data(#"{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:1"}}"#.utf8)) == "http://127.0.0.1:1", "settings base URL")
+    let split = Report(ok: false, why: "分流：Claude 出口 1.1.1.1 与通用出口 8.8.8.8 不一致", ip: "1.1.1.1", trust: 100)
+    check(split.failedStep == 2, "split routing fails step 3")
+    check(Report(ok: false, why: "可信度 60，需要不低于 80", ip: "1.1.1.1", trust: 60).failedStep == 1, "low trust fails step 2")
+    check(Report(ok: false, why: "无法取得 Claude 出口 IP：超时").failedStep == 0, "no exit fails step 1")
+    check(trustLabel(100) == "极度纯净" && trustLabel(62) == "良好" && trustLabel(10) == "可疑", "trust labels")
+    check((try? JSONDecoder().decode(Report.self, from: Data(#"{"ok":true,"ip":"8.8.8.8","trust":100,"cleanip":{"score":45},"score":45,"flags":[]}"#.utf8)))?.trust == 100, "report decodes checker JSON")
     check(shellQuote("a'b") == "'a'\\''b'", "shell quoting")
     check(cliSummary(["T3 Code (Beta)": 1]) == "T3 Code", "cli source: single, suffix dropped")
     check(cliSummary(["Warp": 1, "Terminal": 2, "Alpha": 1]) == "Terminal ×2 · Alpha · Warp", "cli source: order and count")
@@ -220,8 +226,10 @@ func selftest() -> Int32 {
 @MainActor func snapshot(to dir: String) {
     try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
     let now = Date()
-    let pass = Report(min: 95, ok: true, ip: "203.0.113.10", score: 97, grade: "A+", type: "住宅 IP", native: "原生 IP", network: "ISP", location: "美国 · 加利福尼亚", trust: 100)
-    var fail = pass; fail.ok = false; fail.score = 88; fail.grade = "A"
+    let pass = Report(ok: true, ip: "203.0.113.10", trust: 100, min_trust: 80, residential: true, flags: [], type: "住宅 IP",
+                      location: "美国 · 纽约州 · 纽约", org: "Comcast Cable Communications, LLC", generic_ip: "203.0.113.10",
+                      score: 45, grade: "D", native: "原生 IP")
+    var fail = pass; fail.ok = false; fail.trust = 62; fail.why = "可信度 62，需要不低于 80"
     func samples(_ failing: Bool) -> [Sample] {
         (0..<100).map { i in
             let t = now.timeIntervalSince1970 - Double(100 - i) * 3
@@ -240,7 +248,7 @@ func selftest() -> Int32 {
     func model(_ configure: (GuardModel) -> Void) -> GuardModel {
         let m = GuardModel()
         m.now = now
-        m.minScore = 95
+        m.minTrust = 80
         m.onUnstable = "pause"
         m.events = events
         m.day = stats(events, since: now.addingTimeInterval(-86400))
@@ -259,7 +267,7 @@ func selftest() -> Int32 {
     let cases: [(String, CGFloat, GuardModel, Bool)] = [
         ("flow-checking", 420, model { m in m.phase = .checking; m.steps = [.done, .running, .waiting, .waiting] }, false),
         ("flow-pass", 420, model { m in m.phase = .decided; m.report = pass; m.steps = [.done, .done, .done, .waiting] }, false),
-        ("flow-fail", 420, model { m in m.phase = .decided; m.report = fail; m.failure = reason(fail, min: 95); m.steps = [.done, .failed, .waiting, .waiting] }, false),
+        ("flow-fail", 420, model { m in m.phase = .decided; m.report = fail; m.failure = fail.why; m.steps = [.done, .failed, .waiting, .waiting] }, false),
         ("console-healthy", 420, model { m in active(m, .ok); m.route = Route(kind: .localDown, url: "127.0.0.1:15721") }, false),
         ("console-choice-forced", 420, model { m in active(m, .ok); m.mode = .forced; m.report = fail; m.showChoice = true; m.clients = ClientCounts() }, false),
         ("console-retrying", 420, model { m in active(m, .retry); m.killArmed = now }, false),

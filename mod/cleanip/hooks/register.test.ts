@@ -37,3 +37,9 @@ test('a lower threshold lets a lower score through', () => {
   expect(judge(page(92, ' 住宅 IP '), 90).ok).toBe(true)
   expect(judge(page(92, ' 住宅 IP '), 95).ok).toBe(false)
 })
+test('ip.net.coffee trust leads the status line; CleanIP score is only a fallback', () => {
+  expect(statusLine({ ok: true, ip: '8.8.8.8', trust: 100, score: 45, grade: 'D', type: '住宅 IP', native: '原生 IP' }))
+    .toBe('可信 100 ▰▰▰▰▰▰▰▰▰▰ · 原生 · 住宅 · 8.8.8.8')
+  expect(statusLine({ ok: false, ip: '8.8.8.8', trust: 60, why: '可信度 60，需要不低于 80' }))
+    .toBe('可信 60 ▰▰▰▰▰▰▱▱▱▱ ⛔ 未通过 · 可信度 60，需要不低于 80 · 8.8.8.8')
+})
