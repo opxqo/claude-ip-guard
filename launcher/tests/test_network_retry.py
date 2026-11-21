@@ -21,9 +21,10 @@ loader.exec_module(watch)
 
 
 class RetryTests(unittest.TestCase):
-    def scenario(self, probes, grace=30):
+    def scenario(self, probes, grace=30, policy=None):
         snapshots, signals = [], []
-        with tempfile.TemporaryDirectory() as tmp, patch.object(net, 'ROOT', Path(tmp)), patch.object(net, 'HEALTH', Path(tmp) / 'health'), patch.object(net, 'process_identity', return_value='birth'), patch.object(watch.sys, 'argv', ['watch', '8.8.8.8']), patch.object(watch.signal, 'signal'), patch.object(watch, 'notify'), patch.object(watch, 'GRACE_SECONDS', grace), patch.object(net, 'probe', side_effect=probes) as probe, patch.object(watch.os, 'kill', side_effect=lambda pid, sig: signals.append(sig)), patch.object(watch.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, 'S', '')):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(net, 'ROOT', Path(tmp)), patch.object(net, 'HEALTH', Path(tmp) / 'health'), patch.object(net, 'CONFIG', Path(tmp) / 'conf'), patch.object(net, 'process_identity', return_value='birth'), patch.object(watch.sys, 'argv', ['watch', '8.8.8.8']), patch.object(watch.signal, 'signal'), patch.object(watch, 'notify'), patch.object(watch, 'GRACE_SECONDS', grace), patch.object(net, 'probe', side_effect=probes) as probe, patch.object(watch.os, 'kill', side_effect=lambda pid, sig: signals.append(sig)), patch.object(watch.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, 'S', '')):
+            if policy: net.CONFIG.write_text('ON_UNSTABLE=%s\n' % policy)
             def target_set():
                 return {99999999: 'claude'} if probe.call_count < len(probes) else {}
             def snapshot(_timeout):
@@ -32,7 +33,8 @@ class RetryTests(unittest.TestCase):
                 code = watch.main()
             self.assertFalse((Path(tmp) / 'ip-watch-paused.json').exists())
             log = (Path(tmp) / 'ip-watch.log').read_text()
-            self.assertEqual(json.loads(net.HEALTH.read_text())['state'], 'stopped')
+            final_state = json.loads(net.HEALTH.read_text())['state']
+            self.assertEqual(final_state, 'blocked' if code else 'stopped')
         return code, snapshots, signals, log
 
     def test_transient_failure_pauses_then_resumes_same_process(self):
@@ -64,6 +66,13 @@ class RetryTests(unittest.TestCase):
         self.assertIn(signal.SIGSTOP, signals)
         self.assertIn(signal.SIGKILL, signals)
         self.assertIn('超过重试窗口', log)
+
+    def test_kill_policy_closes_on_first_failure_without_pausing(self):
+        code, states, signals, log = self.scenario([net.ProbeUnavailable('timeout'), ('8.8.8.8', 'proxy')], policy='kill')
+        self.assertEqual(code, 1)
+        self.assertNotIn(signal.SIGSTOP, signals)
+        self.assertIn(signal.SIGKILL, signals)
+        self.assertIn('立即关闭策略', log)
 
     def test_real_disposable_child_stops_and_continues(self):
         child = subprocess.Popen(['/bin/sleep', '30'])

@@ -66,8 +66,22 @@ export const statusLine = (r: Report): string => {
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
-    let r: Report
+    let r: Report | null = null
+    // A live Claude IP Guard console already checked this exit IP: reuse its verdict instead of
+    // repeating the CleanIP lookup. A forced console session is authorised by --status below.
     try {
+      const s = await $.process.run([OVERRIDE, '--session'], { timeoutMs: 5000 })
+      const session = s.exitCode === 0 ? JSON.parse(s.stdout) : null
+      if (session && typeof session.ip === 'string') {
+        const base: Report = { ...(session.report ?? {}), ok: session.mode === 'verified', ip: session.ip }
+        const ready = await $.process.run([OVERRIDE, '--ensure', session.ip], { timeoutMs: 15000 }).catch(() => null)
+        r = ready?.exitCode !== 0 ? { ...base, ok: false, why: '监控未就绪或出口不一致' }
+          : base.ok ? base : { ...base, ok: false, why: base.why ?? '控制台强制启动' }
+      }
+    } catch {
+      r = null
+    }
+    if (!r) try {
       const checked = await $.process.run([CHECK, '--json'], { timeoutMs: 150000 })  // the checker retries each failed lookup (CleanIP, ip.net.coffee) up to 3 times
       const parsed = JSON.parse(checked.stdout)
       if (typeof parsed.ok !== 'boolean' || (parsed.ok && typeof parsed.ip !== 'string')) throw Error('invalid report')

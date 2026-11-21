@@ -28,7 +28,8 @@ def is_claude(info):
     cmd = info['command'] if info else ''
     return (cmd == '/Applications/Claude.app/Contents/MacOS/Claude'
             or '/claude.app/Contents/MacOS/claude' in cmd
-            or cmd.startswith(str(Path.home() / '.local/share/claude/versions/')))
+            or cmd.startswith(str(Path.home() / '.local/share/claude/versions/'))
+            or cmd == str(Path.home() / '.local/bin/claude'))
 
 
 def ipv4(value):
@@ -43,11 +44,71 @@ def watcher_ready(ip):
     return network.health(ip) is not None
 
 
+LAUNCHER = str(Path.home() / 'Applications/Claude (IP Guard).app/Contents/MacOS/ClaudeIPGuard')
+SESSION = ROOT / 'guard-session.json'
+
+
+def console_caller():
+    """Only the console app itself may authorise; returns its pid and process info."""
+    pid = os.getppid()
+    caller = process(pid)
+    if not caller or caller['command'] != LAUNCHER:
+        raise ValueError('请通过 Claude IP Guard 控制台确认授权，不能直接调用授权命令')
+    return pid, caller
+
+
+def session_begin(ip, mode, report=None):
+    """The console's run: one confirmation covers every Claude client started while it lives."""
+    if mode not in ('verified', 'forced'):
+        raise ValueError('未知的会话模式')
+    pid, caller = console_caller()
+    ip = ipv4(ip)
+    network.ensure(ip, holder=pid)
+    ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
+    data = {'pid': pid, 'started': caller['started'], 'command': caller['command'], 'ip': ip,
+            'mode': mode, 'report': json.loads(report) if report else None, 'since': time.time()}
+    temp = ROOT / ('session-%s.tmp' % os.getpid())
+    fd = os.open(str(temp), os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+    with os.fdopen(fd, 'w') as f:
+        json.dump(data, f)
+    os.replace(temp, SESSION)
+    return data
+
+
+def session():
+    """The live console session, or None once the console process is gone or replaced."""
+    try:
+        data = json.loads(SESSION.read_text())
+        info = process(int(data['pid']))
+        if info and info['started'] == data['started'] and info['command'] == data['command']:
+            ipv4(data['ip'])
+            return data
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return None
+
+
+def session_end():
+    console_caller()
+    SESSION.unlink(missing_ok=True)
+    network.hold_path().unlink(missing_ok=True)
+
+
+def stop_watch():
+    """SIGTERM the running monitor (checked by its command line); it publishes its own final state."""
+    try:
+        pid = int((ROOT / 'ip-watch.pid').read_text().split()[0])
+    except (OSError, ValueError, IndexError):
+        return False
+    p = subprocess.run(['/bin/ps', '-p', str(pid), '-o', 'args='], capture_output=True, text=True)
+    if p.returncode or str(WATCH) not in p.stdout:
+        return False
+    os.kill(pid, 15)
+    return True
+
+
 def grant(pid, ip):
-    caller = process(os.getppid())
-    launcher = str(Path.home() / 'Applications/Claude (IP Guard).app/Contents/MacOS/ClaudeIPGuard')
-    if not caller or caller['command'] != launcher:
-        raise ValueError('请通过启动器的两次确认授权，不能直接调用授权命令')
+    console_caller()
     ip = ipv4(ip)
     info = process(pid)
     if not is_claude(info):
@@ -81,6 +142,7 @@ def prune():
 
 
 def status(pid):
+    start = pid
     for _ in range(32):
         info = process(pid)
         if not info:
@@ -94,6 +156,17 @@ def status(pid):
         except (OSError, ValueError, KeyError, TypeError):
             pass
         pid = info['parent']
+    # A forced console session authorises any Claude process while the console and monitor live.
+    s = session()
+    if s and s['mode'] == 'forced' and watcher_ready(s['ip']):
+        pid = start
+        for _ in range(32):
+            info = process(pid)
+            if not info:
+                break
+            if is_claude(info):
+                return s
+            pid = info['parent']
     return None
 
 
@@ -103,8 +176,19 @@ def main():
         if action == '--baseline':
             print(baseline())
         elif action == '--ensure':
-            network.ensure(sys.argv[2])
+            holder = int(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[3] == '--hold' else None
+            network.ensure(sys.argv[2], holder=holder)
             print('ready')
+        elif action == '--session-begin':
+            print(json.dumps(session_begin(sys.argv[2], sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else None)))
+        elif action == '--session':
+            data = session()
+            print(json.dumps(data))
+            return 0 if data else 1
+        elif action == '--session-end':
+            session_end()
+        elif action == '--stop-watch':
+            print('stopped' if stop_watch() else 'not running')
         elif action == '--health':
             data = network.health()
             print(json.dumps(data))

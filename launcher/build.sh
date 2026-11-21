@@ -1,9 +1,10 @@
 #!/bin/zsh
-# Builds ~/Applications/Claude (IP Guard).app from ClaudeIPGuard.swift.
+# Builds ~/Applications/Claude (IP Guard).app (the network guard console) from Sources/*.swift.
 set -e
 cd "${0:A:h}"
 APP="$HOME/Applications/Claude (IP Guard).app"
-swiftc -O -swift-version 5 -target arm64-apple-macos14 -o ClaudeIPGuard ClaudeIPGuard.swift
+swiftc -O -swift-version 5 -target arm64-apple-macos14 -o ClaudeIPGuard Sources/*.swift
+./ClaudeIPGuard --selftest > /dev/null || { ./ClaudeIPGuard --selftest | grep FAIL; rm -f ClaudeIPGuard; exit 1; }
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 mv ClaudeIPGuard "$APP/Contents/MacOS/"
@@ -18,12 +19,16 @@ cat > "$APP/Contents/Info.plist" <<PL
   <key>CFBundleExecutable</key><string>ClaudeIPGuard</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.0</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>2.0</string>
+  <key>CFBundleVersion</key><string>2</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSAppleEventsUsageDescription</key><string>在 Terminal 中打开 Claude Code CLI。</string>
 </dict></plist>
 PL
 codesign --force -s - "$APP"
 touch "$APP"
 echo "built: $APP"
+if pgrep -xq ClaudeIPGuard; then
+  echo "note: a console is still running the previous build; quit it from its menu and open the app again."
+fi

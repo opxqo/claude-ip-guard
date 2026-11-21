@@ -14,6 +14,43 @@ URLS = ('https://api.ipify.org', 'https://ipv4.icanhazip.com', 'https://checkip.
 # A heartbeat this young was published after a passing probe, so a prompt check can reuse it.
 FRESH_HEARTBEAT = 5
 HEALTH = ROOT / 'ip-watch-health.json'
+CONFIG = Path.home() / '.claude/ip-guard.conf'
+
+
+def unstable_policy():
+    """ON_UNSTABLE=pause (default: SIGSTOP and retry) or kill (close Claude on the first failed probe)."""
+    try:
+        lines = CONFIG.read_text().splitlines()
+    except OSError:
+        return 'pause'
+    for line in reversed(lines):
+        key, _, value = line.strip().partition('=')
+        if key == 'ON_UNSTABLE' and value.strip() in ('pause', 'kill'):
+            return value.strip()
+    return 'pause'
+
+
+def hold_path():
+    return ROOT / 'ip-watch-hold.json'
+
+
+def hold(pid):
+    """Keep the monitor alive while the console process (pid + birth) lives, even with no Claude running."""
+    identity = process_identity(pid)
+    if not identity:
+        raise ValueError('控制台进程不存在，无法保持监控')
+    ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temp = ROOT / ('hold-%s.tmp' % os.getpid())
+    temp.write_text(json.dumps({'pid': pid, 'identity': identity}))
+    os.replace(temp, hold_path())
+
+
+def holder_alive():
+    try:
+        d = json.loads(hold_path().read_text())
+        return bool(d.get('identity')) and process_identity(int(d['pid'])) == d['identity']
+    except (OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired):
+        return False
 
 
 class QueryError(ValueError):
@@ -172,9 +209,11 @@ def validate_lease(ip):
         raise ValueError('仍有 Claude 使用旧基准 IP，请先退出后再建立新基准')
 
 
-def ensure(ip):
+def ensure(ip, holder=None):
     ip = str(ipaddress.IPv4Address(ip))
     validate_lease(ip)
+    if holder:
+        hold(holder)
     if health(ip): return
     # Never replace the baseline of a living monitor to accommodate a changed network.
     pidfile = ROOT / 'ip-watch.pid'

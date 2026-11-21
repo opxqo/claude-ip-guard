@@ -33,8 +33,9 @@ const harness = () => {
 test('normal session uses shared checker and waits for monitored matching IP', async () => {
   const h = harness()
   await h.handlers['session.start'](h.api, {}, async () => 'started')
-  expect(h.calls[0][0].endsWith('claude-ip-check')).toBe(true)
-  expect(h.calls[1].slice(1).join(' ')).toBe('--ensure 8.8.8.8')
+  const calls = h.calls.filter(argv => argv[1] !== '--session')  // no console session in this harness
+  expect(calls[0][0].endsWith('claude-ip-check')).toBe(true)
+  expect(calls[1].slice(1).join(' ')).toBe('--ensure 8.8.8.8')
   expect(await h.handlers['prompt.submit'](h.api, {}, async () => 'forwarded')).toBe('forwarded')
   h.flags.live = false
   expect((await h.handlers['prompt.submit'](h.api, {}, async () => 'forwarded')).drop).toBe('网络一致性检测未通过，请通过 IP Guard 重新检测')

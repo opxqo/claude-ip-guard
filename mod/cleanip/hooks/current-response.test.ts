@@ -37,6 +37,7 @@ const harness = (raw: string) => {
     process: { run: async (...args: any[]) => {
       if (args[0][0].endsWith('claude-ip-check')) return { exitCode: judge(raw, 94).ok ? 0 : 1, stdout: JSON.stringify(judge(raw, 94)) }
       if (args[0][1] === '--ensure' || args[0][1] === '--verify' || args[0][1] === '--health') return { exitCode: 0, stdout: 'ready' }
+      if (args[0][1] === '--session') return { exitCode: 1, stdout: 'null' }  // no console session
       kills.push(args)
       return { exitCode: 1 }
     } },

@@ -14,7 +14,17 @@ import time
 import claude_network as net
 
 
-def targets():
+DESKTOP = '/Applications/Claude.app/Contents/MacOS/Claude'
+
+
+def is_root(cmd):
+    return (cmd == DESKTOP
+            or '/claude.app/Contents/MacOS/claude' in cmd
+            or cmd.startswith(str(Path.home() / '.local/share/claude/versions/'))
+            or cmd == str(Path.home() / '.local/bin/claude'))
+
+
+def process_table():
     result = subprocess.run(['/bin/ps', '-axo', 'pid=,ppid=,comm='], capture_output=True, text=True)
     if result.returncode:
         raise ValueError('无法读取 Claude 进程状态')
@@ -23,11 +33,29 @@ def targets():
         p = line.strip().split(None, 2)
         if len(p) == 3:
             rows[int(p[0])] = (int(p[1]), p[2])
-    roots = {pid for pid, (_, cmd) in rows.items() if (
-        cmd == '/Applications/Claude.app/Contents/MacOS/Claude'
-        or '/claude.app/Contents/MacOS/claude' in cmd
-        or cmd.startswith(str(Path.home() / '.local/share/claude/versions/'))
-        or cmd == str(Path.home() / '.local/bin/claude'))}
+    return rows
+
+
+def clients(rows=None):
+    """Counts for the console: the desktop app, and CLI sessions not started by the desktop app."""
+    rows = process_table() if rows is None else rows
+    def ancestors(pid):
+        seen = set()
+        while pid in rows and pid not in seen and pid > 1:
+            seen.add(pid)
+            pid = rows[pid][0]
+            yield pid
+    desktop = [pid for pid, (_, cmd) in rows.items() if cmd == DESKTOP]
+    cli = [pid for pid, (_, cmd) in rows.items() if is_root(cmd) and cmd != DESKTOP
+           and not any(a in rows and is_root(rows[a][1]) for a in ancestors(pid))]
+    embedded = [pid for pid, (_, cmd) in rows.items() if is_root(cmd) and cmd != DESKTOP and pid not in cli]
+    return {'desktop': len(desktop), 'desktop_sessions': len(embedded), 'cli': len(cli),
+            'processes': len(targets(rows))}
+
+
+def targets(rows=None):
+    rows = process_table() if rows is None else rows
+    roots = {pid for pid, (_, cmd) in rows.items() if is_root(cmd)}
     chosen = set(roots)
     while True:
         children = {pid for pid, (parent, _) in rows.items() if parent in chosen}
@@ -121,8 +149,30 @@ class PausedProcesses:
         self.path.unlink(missing_ok=True)
 
 
+def append_log(message):
+    """One line in the monitor's log format, written by a short-lived command (kill-all)."""
+    net.ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+    stamp = time.strftime('%Y-%m-%d %H:%M:%S') + ',%03d' % (int(time.time() * 1000) % 1000)
+    with open(net.ROOT / 'ip-watch.log', 'a') as f:
+        f.write('%s [%s] %s\n' % (stamp, os.getpid(), message))
+
+
+def kill_all(reason='manual'):
+    """Close every Claude Code process now (desktop, CLI and their children). Codex is never targeted."""
+    known = {pid: net.process_identity(pid) for pid in targets()}
+    terminate(known)
+    append_log('KILL: %s; matching Claude processes=%s' % (reason, len(known)))
+    return len(known)
+
+
 def main():
     args = sys.argv[1:]
+    if args == ['--list']:
+        print(json.dumps(clients()))
+        return 0
+    if args == ['--kill-all']:
+        print(json.dumps({'killed': kill_all('手动一键关闭')}))
+        return 0
     dry = bool(args and args[0] == '--dry-run')
     if dry: args.pop(0)
     if len(args) != 1: return 2
@@ -159,6 +209,8 @@ def main():
     seen = False
     started = time.monotonic()
     attempts = 0
+    latency = None  # milliseconds the last probe took, for the console's live chart
+    final = {'state': 'stopped', 'reason': ''}
     def publish(state, transport='', reason=''):
         temp = net.ROOT / ('health-%s.tmp' % os.getpid())
         temp.write_text(json.dumps({'pid': os.getpid(), 'identity': identity, 'ip': baseline,
@@ -166,13 +218,15 @@ def main():
                                    'transport': transport, 'reason': reason,
                                    'retry_count': attempts, 'paused_count': len(paused.owned),
                                    'retry_deadline': (paused.since + GRACE_SECONDS) if paused.since else None,
-                                   'policy': 'pause-retry-v1'}))
+                                   'latency_ms': latency, 'on_unstable': net.unstable_policy(),
+                                   'held': net.holder_alive(), 'policy': 'pause-retry-v1'}))
         os.replace(temp, net.HEALTH)
     def current(known):
         for pid in targets():
             if pid not in known: known[pid] = net.process_identity(pid)
         return known
     def close_all(known, reason):
+        final.update(state='blocked', reason=reason)
         publish('blocked', reason=reason)
         known.update(paused.owned)
         log.error('KILL: %s; matching Claude processes=%s', reason, len(known))
@@ -190,10 +244,14 @@ def main():
                 lease = net.ROOT / ('lease-%s.tmp' % os.getpid())
                 lease.write_text(json.dumps({'ip': baseline, 'processes': identities}))
                 os.replace(lease, net.ROOT / 'ip-watch-lease.json')
+            elif net.holder_alive():
+                seen = True  # once the console lets go, exit as soon as no Claude is left
             elif seen or time.monotonic() - started > 60:
                 log.info('no Claude process left, exiting'); break
+            began = time.monotonic()
             try:
                 _, fingerprint = net.probe(baseline)
+                latency = round((time.monotonic() - began) * 1000)
                 if stopped.is_set(): break
                 attempts = 0
                 publish('healthy', fingerprint)
@@ -206,7 +264,11 @@ def main():
                 return close_all(current(identities), '确认出口变化或冲突：' + str(exc))
             except Exception as exc:
                 attempts += 1
+                latency = None
                 reason = str(exc)
+                if net.unstable_policy() == 'kill':
+                    log.warning('UNSTABLE: policy=kill; %s', reason)
+                    return close_all(current(identities), '网络波动（立即关闭策略）：' + reason)
                 publish('retrying', reason=reason)
                 first = paused.since is None
                 paused.pause(current(identities))
@@ -220,8 +282,10 @@ def main():
     finally:
         if paused.owned:
             log.error('KILL: monitor stopped while Claude was paused')
+            final.update(state='blocked', reason='监控在 Claude 暂停期间停止')
             paused.close()
-        publish('stopped')
+        # Keep a closed state visible to the console; a normal exit reads as stopped.
+        publish(final['state'], reason=final['reason'])
         try:
             if pidfile.read_text().split()[0] == str(os.getpid()): pidfile.unlink()
         except (OSError, IndexError): pass

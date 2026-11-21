@@ -177,10 +177,10 @@ class NetworkTests(unittest.TestCase):
             kill.assert_called_once_with(124, watch.signal.SIGKILL)
 
     def run_watcher(self, failures=False):
-        with tempfile.TemporaryDirectory() as tmp, patch.object(net, 'ROOT', Path(tmp)), patch.object(net, 'HEALTH', Path(tmp) / 'health'), patch.object(net, 'process_identity', return_value='test-process'), patch.object(watch.sys, 'argv', ['watch', '8.8.8.8']), patch.object(watch.signal, 'signal'), patch.object(watch, 'targets', side_effect=[{123: 'claude'}, {}] if not failures else [{123: 'claude'}, {123: 'claude', 124: 'new-claude'}]), patch.object(net, 'probe', side_effect=net.ExitChanged('changed') if failures else None, return_value=('8.8.8.8', 'proxy')), patch.object(watch, 'terminate') as terminate, patch.object(watch.threading.Event, 'wait'), patch.object(watch, 'notify'):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(net, 'ROOT', Path(tmp)), patch.object(net, 'HEALTH', Path(tmp) / 'health'), patch.object(net, 'CONFIG', Path(tmp) / 'conf'), patch.object(net, 'process_identity', return_value='test-process'), patch.object(watch.sys, 'argv', ['watch', '8.8.8.8']), patch.object(watch.signal, 'signal'), patch.object(watch, 'targets', side_effect=[{123: 'claude'}, {}] if not failures else [{123: 'claude'}, {123: 'claude', 124: 'new-claude'}]), patch.object(net, 'probe', side_effect=net.ExitChanged('changed') if failures else None, return_value=('8.8.8.8', 'proxy')), patch.object(watch, 'terminate') as terminate, patch.object(watch.threading.Event, 'wait'), patch.object(watch, 'notify'):
             code = watch.main()
             self.assertEqual(code, 1 if failures else 0)
-            self.assertEqual(json.loads(net.HEALTH.read_text())['state'], 'stopped')
+            self.assertEqual(json.loads(net.HEALTH.read_text())['state'], 'blocked' if failures else 'stopped')
             self.assertFalse((net.ROOT / 'ip-watch.pid').exists())
             if failures: self.assertEqual(set(terminate.call_args[0][0]), {123, 124})
             else: terminate.assert_not_called()
@@ -215,5 +215,63 @@ class NetworkTests(unittest.TestCase):
                 with patch.object(override, 'watcher_ready', return_value=False): self.assertIsNone(override.status(123))
             with patch.object(override, 'process', return_value=None): self.assertIsNone(override.status(123))
 
+
+    def test_client_counts_split_desktop_and_cli_sessions(self):
+        home = str(Path.home())
+        rows = {10: (1, '/Applications/Claude.app/Contents/MacOS/Claude'),
+                11: (10, '/Applications/Claude.app/Contents/Frameworks/Claude Helper'),
+                12: (10, home + '/Library/Application Support/Claude/claude-code/2/x/claude.app/Contents/MacOS/claude'),
+                20: (1, '/bin/zsh'), 21: (20, home + '/.local/bin/claude'), 22: (21, '/bin/zsh'),
+                30: (1, '/Applications/Codex.app/Contents/MacOS/Codex')}
+        self.assertEqual(watch.clients(rows), {'desktop': 1, 'desktop_sessions': 1, 'cli': 1, 'processes': 5})
+
+    def test_kill_all_signals_only_claude_targets_and_logs(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(net, 'ROOT', Path(tmp)), patch.object(watch, 'targets', return_value={10: 'c', 11: 'c'}), patch.object(net, 'process_identity', return_value='birth'), patch.object(watch.os, 'kill') as kill:
+            self.assertEqual(watch.kill_all('test'), 2)
+            self.assertEqual(sorted(c.args[0] for c in kill.call_args_list), [10, 11])
+            self.assertIn('KILL: test; matching Claude processes=2', (Path(tmp) / 'ip-watch.log').read_text())
+
+    def test_unstable_policy_reads_last_valid_line(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(net, 'CONFIG', Path(tmp) / 'conf'):
+            self.assertEqual(net.unstable_policy(), 'pause')
+            net.CONFIG.write_text('ON_UNSTABLE=kill\nON_UNSTABLE=bogus\n')
+            self.assertEqual(net.unstable_policy(), 'kill')
+
+    def test_hold_keeps_watcher_alive_without_claude(self):
+        """With a live console hold, an empty process list does not end the monitor."""
+        with tempfile.TemporaryDirectory() as tmp, patch.object(net, 'ROOT', Path(tmp)), patch.object(net, 'HEALTH', Path(tmp) / 'health'), patch.object(net, 'CONFIG', Path(tmp) / 'conf'), patch.object(net, 'process_identity', return_value='console'), patch.object(watch.sys, 'argv', ['watch', '8.8.8.8']), patch.object(watch.signal, 'signal'), patch.object(watch, 'targets', return_value={}), patch.object(net, 'probe', return_value=('8.8.8.8', 'proxy')), patch.object(watch, 'notify'):
+            net.hold(4242)
+            waits = []
+            def wait(_t):
+                waits.append(1)
+                if len(waits) == 3: net.hold_path().unlink()
+            with patch.object(watch.threading.Event, 'wait', side_effect=wait):
+                self.assertEqual(watch.main(), 0)
+            self.assertGreaterEqual(len(waits), 3)
+            health = json.loads(net.HEALTH.read_text())
+            self.assertEqual(health['state'], 'stopped')
+            log = watch.logging.getLogger('claude-ip-watch')
+            for h in log.handlers[:]: h.close(); log.removeHandler(h)
+
+    def test_forced_console_session_authorises_claude_descendants_only(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(override, 'ROOT', Path(tmp)), patch.object(override, 'SESSION', Path(tmp) / 'guard-session.json'), patch.object(override, 'watcher_ready', return_value=True):
+            console = dict(parent=1, command=override.LAUNCHER, started='console birth')
+            claude = dict(parent=1, command='/Applications/Claude.app/Contents/MacOS/Claude', started='c')
+            node = dict(parent=50, command='/usr/bin/node', started='n')
+            table = {7: console, 50: claude, 51: node, 60: dict(parent=1, command='/bin/zsh', started='z')}
+            override.SESSION.write_text(json.dumps(dict(pid=7, started='console birth', command=override.LAUNCHER, ip='8.8.8.8', mode='forced')))
+            with patch.object(override, 'process', side_effect=lambda pid: table.get(pid)):
+                self.assertIsNotNone(override.status(51))
+                self.assertIsNone(override.status(60))
+                with patch.object(override, 'watcher_ready', return_value=False): self.assertIsNone(override.status(51))
+                override.SESSION.write_text(json.dumps(dict(pid=7, started='console birth', command=override.LAUNCHER, ip='8.8.8.8', mode='verified')))
+                self.assertIsNone(override.status(51))
+            # Console gone: the session is void.
+            with patch.object(override, 'process', return_value=None): self.assertIsNone(override.session())
+
+    def test_session_commands_refuse_other_callers(self):
+        with patch.object(override, 'process', return_value=dict(parent=1, command='/bin/zsh', started='x')):
+            with self.assertRaises(ValueError): override.session_begin('8.8.8.8', 'forced')
+            with self.assertRaises(ValueError): override.session_end()
 
 if __name__ == '__main__': unittest.main(verbosity=2)

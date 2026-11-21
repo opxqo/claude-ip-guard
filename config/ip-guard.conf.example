@@ -4,3 +4,9 @@ MIN_SCORE=95
 
 # ip.net.coffee 的 trust_score（0–100）必须不低于这个数才放行；两家检测都通过才算通过。
 MIN_TRUST=80
+
+# 网络波动（查不到出口 IP，但 IP 没有确认变化）时的处理：
+#   pause = 暂停 Claude 并重试约 30 秒，恢复后继续（默认）
+#   kill  = 立即关闭全部 Claude
+# 出口 IP 一旦确认变化，两种策略都会立即关闭。控制台里切换后立刻生效。
+ON_UNSTABLE=pause
